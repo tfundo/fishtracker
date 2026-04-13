@@ -4,11 +4,10 @@
 // ============================================================
 
 const CONFIG = {
-  // ---------- Global Fishing Watch API ----------
-  GFW_API_BASE: 'https://gateway.api.globalfishingwatch.org',
-  GFW_API_VERSION: 'v3',
-  // Reemplaza con tu token de GFW (registro gratuito en globalfishingwatch.org)
-  GFW_TOKEN: '80e4d5513c36e34d2ed75ae3f0a5a2b0cafc31f3',
+  // ---------- AISStream API (WebSocket en tiempo real) ----------
+  // https://aisstream.io — token gratuito
+  AISSTREAM_TOKEN: '80e4d5513c36e34d2ed75ae3f0a5a2b0cafc31f3',
+  AISSTREAM_WS:    'wss://stream.aisstream.io/v0/stream',
 
   // ---------- Mapa ----------
   MAP_CENTER: [20, 0],
@@ -32,12 +31,12 @@ const CONFIG = {
     set_gillnets:  { label: 'Enmalle',    icon: '🟦', color: '#2ecc71', gfw: 'set_gillnets' },
   },
 
-  // ---------- Periodos ----------
+  // ---------- Periodos (tiempo máximo de inactividad antes de retirar un barco del mapa) ----------
   PERIODS: {
-    today:   { label: 'Hoy',     days: 1   },
-    week:    { label: '7 días',  days: 7   },
-    month:   { label: '30 días', days: 30  },
-    year:    { label: '1 año',   days: 365 },
+    today:   { label: 'Hoy',     inactiveMs: 30  * 60 * 1000 },  // 30 min
+    week:    { label: '7 días',  inactiveMs: 180 * 60 * 1000 },  // 3 h
+    month:   { label: '30 días', inactiveMs: 720 * 60 * 1000 },  // 12 h
+    year:    { label: '1 año',   inactiveMs: 0               },  // toda la sesión
   },
 
   // ---------- Puertos principales (demo sin API) ----------

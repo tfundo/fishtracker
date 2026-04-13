@@ -1,6 +1,6 @@
 /* ============================================================
    FishTracker — app.js
-   Lógica principal: mapa, API GFW, filtros, búsqueda, UI
+   Lógica principal: mapa, AISStream WebSocket, filtros, UI
    ============================================================ */
 
 'use strict';
@@ -11,21 +11,25 @@ const App = (() => {
   //  Estado global
   // ──────────────────────────────────────────────
   const state = {
-    map:           null,
-    tileLayer:     null,
-    vesselLayer:   null,   // LayerGroup de marcadores
-    heatLayer:     null,   // Leaflet.heat layer
-    portLayer:     null,   // LayerGroup de puertos
-    vessels:       [],     // Array de barcos cargados
-    filteredVessels: [],
-    selectedVessel: null,
-    trackedVessel:  null,
-    activeGears:   new Set(Object.keys(CONFIG.GEAR_TYPES)),
-    activePeriod:  'week',
-    layers: { vessels: true, heatmap: true, ports: true },
-    isDark:        true,
-    isLoading:     false,
-    apiAvailable:  false,
+    map:              null,
+    tileLayer:        null,
+    vesselLayer:      null,
+    heatLayer:        null,
+    portLayer:        null,
+    vesselMap:        new Map(),   // mmsi → vessel object (fuente de verdad)
+    vessels:          [],          // array derivado de vesselMap tras filtros
+    filteredVessels:  [],
+    selectedVessel:   null,
+    trackedVessel:    null,
+    activeGears:      new Set(Object.keys(CONFIG.GEAR_TYPES)),
+    activePeriod:     'week',
+    layers:           { vessels: true, heatmap: true, ports: true },
+    isDark:           true,
+    isLoading:        false,
+    apiAvailable:     false,
+    ws:               null,        // WebSocket AISStream
+    wsReconnectTimer: null,
+    uiUpdateTimer:    null,        // debounce para re-render
   };
 
   // ──────────────────────────────────────────────
@@ -39,7 +43,8 @@ const App = (() => {
     addPortMarkers();
     setupSearch();
     setupButtons();
-    loadVessels();
+    connectAISStream();
+    startPruneTimer();
   }
 
   // ──────────────────────────────────────────────
@@ -116,7 +121,7 @@ const App = (() => {
         document.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         state.activePeriod = key;
-        loadVessels();
+        applyFilters();
       });
       container.appendChild(btn);
     });
@@ -159,111 +164,182 @@ const App = (() => {
   }
 
   // ──────────────────────────────────────────────
-  //  API Global Fishing Watch
+  //  AISStream — WebSocket en tiempo real
   // ──────────────────────────────────────────────
-  async function loadVessels() {
-    if (state.isLoading) return;
+  function connectAISStream() {
+    clearTimeout(state.wsReconnectTimer);
 
-    showLoader('Cargando datos de barcos…');
-    setLoadingBar(20);
+    if (state.ws) {
+      state.ws.onclose = null;  // evitar reconexión automática al cerrar manualmente
+      state.ws.close();
+      state.ws = null;
+    }
+
+    showLoader('Conectando a AISStream…');
 
     try {
-      const vessels = await fetchVesselsFromGFW();
-      state.apiAvailable = true;
-      setApiStatus(true);
-      setLoadingBar(70);
-      state.vessels = vessels;
-      applyFilters();
-      setLoadingBar(100);
-      toast('Datos cargados desde Global Fishing Watch', 'success');
-    } catch (err) {
-      console.error('Error cargando barcos:', err);
-      setApiStatus(false);
-      toast(`Error al conectar con GFW: ${err.message}`, 'error');
-      state.vessels = [];
-      applyFilters();
-    } finally {
+      state.ws = new WebSocket(CONFIG.AISSTREAM_WS);
+    } catch (e) {
+      toast('WebSocket no soportado en este navegador', 'error');
       hideLoader();
-      setTimeout(() => setLoadingBar(0), 400);
+      return;
     }
+
+    state.ws.onopen = () => {
+      state.ws.send(JSON.stringify({
+        APIKey:             CONFIG.AISSTREAM_TOKEN,
+        BoundingBoxes:      [[[-90, -180], [90, 180]]],
+        FilterMessageTypes: ['PositionReport', 'ShipStaticData'],
+      }));
+      setApiStatus(true);
+      hideLoader();
+      toast('Conectado a AISStream — datos en tiempo real', 'success');
+    };
+
+    state.ws.onmessage = (evt) => {
+      try { handleAISMessage(JSON.parse(evt.data)); } catch (_) {}
+    };
+
+    state.ws.onerror = () => {
+      setApiStatus(false);
+      hideLoader();
+    };
+
+    state.ws.onclose = () => {
+      setApiStatus(false);
+      toast('Conexión perdida. Reconectando en 5 s…', 'warning');
+      state.wsReconnectTimer = setTimeout(connectAISStream, 5000);
+    };
   }
 
-  async function fetchVesselsFromGFW() {
-    const { days } = CONFIG.PERIODS[state.activePeriod];
-    const endDate   = new Date();
-    const startDate = new Date(endDate.getTime() - days * 86400000);
+  function handleAISMessage(msg) {
+    const meta = msg.MetaData || {};
+    const mmsi = String(meta.MMSI || '');
+    if (!mmsi) return;
 
-    const gearTypes = [...state.activeGears]
-      .map(k => CONFIG.GEAR_TYPES[k]?.gfw)
-      .filter(Boolean)
-      .join(',');
+    const now = Date.now();
 
-    const params = new URLSearchParams({
-      datasets:    'public-global-fishing-vessels:latest',
-      'start-date': startDate.toISOString().split('T')[0],
-      'end-date':   endDate.toISOString().split('T')[0],
-      ...(gearTypes ? { 'vessel-types': gearTypes } : {}),
-      limit: 100,
-      offset: 0,
-    });
+    // ── PositionReport ──────────────────────────
+    if (msg.MessageType === 'PositionReport') {
+      const pos = msg.Message?.PositionReport || {};
+      const lat = pos.Latitude;
+      const lon = pos.Longitude;
+      if (lat == null || lon == null || Math.abs(lat) > 90 || Math.abs(lon) > 180) return;
 
-    const response = await fetch(
-      `${CONFIG.GFW_API_BASE}/${CONFIG.GFW_API_VERSION}/vessels/search?${params}`,
-      {
-        headers: {
-          'Authorization': `Bearer ${CONFIG.GFW_TOKEN}`,
-          'Content-Type': 'application/json',
-        },
+      const status   = mapNavStatus(pos.NavigationalStatus ?? -1);
+      const existing = state.vesselMap.get(mmsi);
+
+      // Sólo añadir barcos nuevos si están pescando en este momento
+      if (!existing && status !== 'fishing') return;
+
+      if (existing) {
+        existing.lat      = lat;
+        existing.lon      = lon;
+        existing.speed    = (pos.Sog ?? existing.speed).toFixed(1);
+        existing.course   = Math.round(pos.Cog ?? existing.course);
+        existing.status   = status;
+        existing.lastSeen = new Date().toLocaleTimeString('es-ES');
+        existing.lastTs   = now;
+      } else {
+        state.vesselMap.set(mmsi, {
+          id:       mmsi,
+          name:     meta.ShipName?.trim() || `MMSI ${mmsi}`,
+          mmsi,
+          imo:      '—',
+          flag:     '??',
+          gear:     detectGearFromName(meta.ShipName || ''),
+          status,
+          lat, lon,
+          speed:    (pos.Sog ?? 0).toFixed(1),
+          course:   Math.round(pos.Cog ?? 0),
+          lastSeen: new Date().toLocaleTimeString('es-ES'),
+          lastTs:   now,
+        });
       }
-    );
 
-    if (!response.ok) {
-      throw new Error(`GFW API error: ${response.status} ${response.statusText}`);
+    // ── ShipStaticData ───────────────────────────
+    } else if (msg.MessageType === 'ShipStaticData') {
+      const ship = msg.Message?.ShipStaticData || {};
+      const type = ship.Type ?? -1;
+      const isFishingVessel = (type === 30);
+      const existing = state.vesselMap.get(mmsi);
+
+      // Sólo incorporar barcos nuevos si su tipo AIS es "pesquero" (30)
+      if (!existing && !isFishingVessel) return;
+
+      const v = existing || {
+        id: mmsi, mmsi, lat: 0, lon: 0,
+        speed: '0', course: 0, status: 'transit',
+        lastSeen: '—', lastTs: now, flag: '??',
+      };
+
+      v.name  = ship.Name?.trim() || v.name || `MMSI ${mmsi}`;
+      v.imo   = ship.Imo ? `IMO${ship.Imo}` : v.imo;
+      v.gear  = detectGearFromName(v.name) || detectGearFromType(type) || v.gear || 'trawlers';
+      v.lastTs = now;
+
+      if (!existing) state.vesselMap.set(mmsi, v);
     }
 
-    const data = await response.json();
-    return parseGFWVessels(data.entries || []);
+    scheduleUIUpdate();
   }
 
-  function parseGFWVessels(entries) {
-    return entries.map(entry => {
-      const reg = entry.registryInfo?.[0] || {};
-      const pos = entry.lastPositionEventVisibility || {};
-      const gearKey = mapGFWGearToLocal(reg.vesselType || '');
-
-      return {
-        id:      entry.id || crypto.randomUUID(),
-        name:    reg.shipname || entry.id?.substring(0, 8) || 'Desconocido',
-        mmsi:    reg.mmsi || '—',
-        imo:     reg.imo  || '—',
-        flag:    reg.flag || '??',
-        gear:    gearKey,
-        status:  randomStatus(),
-        lat:     pos.lat  ?? (Math.random() * 160 - 80),
-        lon:     pos.lon  ?? (Math.random() * 360 - 180),
-        speed:   pos.speed ?? (Math.random() * 12).toFixed(1),
-        course:  pos.course ?? Math.floor(Math.random() * 360),
-        lastSeen: pos.timestamp ? new Date(pos.timestamp).toLocaleString('es-ES') : 'Hoy',
-      };
-    });
+  // Detecta arte de pesca por el nombre del barco
+  function detectGearFromName(name) {
+    const n = name.toLowerCase();
+    if (n.includes('trawl') || n.includes('arrastre'))                   return 'trawlers';
+    if (n.includes('seine') || n.includes('seiner') || n.includes('cerco')) return 'purse_seines';
+    if (n.includes('longlin') || n.includes('long line') || n.includes('palangre')) return 'longliners';
+    if (n.includes('gillnet') || n.includes('gill net') || n.includes('enmalle'))   return 'set_gillnets';
+    return 'trawlers'; // arte más común — default seguro
   }
 
-  function mapGFWGearToLocal(type) {
-    const t = type.toLowerCase();
-    if (t.includes('trawl'))      return 'trawlers';
-    if (t.includes('purse'))      return 'purse_seines';
-    if (t.includes('longline') || t.includes('drifting_longlines')) return 'longliners';
-    if (t.includes('gillnet'))    return 'set_gillnets';
-    return Object.keys(CONFIG.GEAR_TYPES)[Math.floor(Math.random() * 4)];
+  // Detecta arte de pesca por tipo AIS (tipo 30 = pesquero genérico)
+  function detectGearFromType(type) {
+    if (type === 30) return 'trawlers';
+    return null;
+  }
+
+  // Mapea NavigationalStatus AIS → estado interno
+  function mapNavStatus(n) {
+    if (n === 1)  return 'anchored';
+    if (n === 7)  return 'fishing';
+    return 'transit';
+  }
+
+  // Actualiza la UI máximo 1 vez cada 2 s para no bloquear el navegador
+  function scheduleUIUpdate() {
+    if (state.uiUpdateTimer) return;
+    state.uiUpdateTimer = setTimeout(() => {
+      state.uiUpdateTimer = null;
+      applyFilters();
+    }, 2000);
+  }
+
+  // Elimina barcos que llevan más tiempo del umbral sin emitir señal
+  function startPruneTimer() {
+    setInterval(() => {
+      const { inactiveMs } = CONFIG.PERIODS[state.activePeriod];
+      if (!inactiveMs) return;  // 0 = mantener toda la sesión
+
+      const cutoff = Date.now() - inactiveMs;
+      let pruned = false;
+      state.vesselMap.forEach((v, mmsi) => {
+        if (v.lastTs < cutoff) { state.vesselMap.delete(mmsi); pruned = true; }
+      });
+      if (pruned) applyFilters();
+    }, 60_000);  // revisar cada minuto
   }
 
   // ──────────────────────────────────────────────
   //  Aplicar filtros y renderizar
   // ──────────────────────────────────────────────
   function applyFilters() {
+    // Derivar array desde el mapa vivo
+    state.vessels = Array.from(state.vesselMap.values());
     state.filteredVessels = state.vessels.filter(v => state.activeGears.has(v.gear));
 
-    // Actualizar contadores
+    // Actualizar contadores por tipo de arte
     Object.keys(CONFIG.GEAR_TYPES).forEach(key => {
       const el = document.getElementById(`gearCount_${key}`);
       if (el) el.textContent = state.vessels.filter(v => v.gear === key).length;
@@ -586,7 +662,8 @@ const App = (() => {
     });
 
     document.getElementById('refreshBtn').addEventListener('click', () => {
-      loadVessels();
+      state.vesselMap.clear();
+      connectAISStream();
     });
 
     document.getElementById('centerMapBtn').addEventListener('click', () => {
@@ -624,7 +701,7 @@ const App = (() => {
   function setApiStatus(ok) {
     const dot = document.getElementById('apiStatus');
     dot.style.background = ok ? 'var(--success)' : 'var(--warning)';
-    dot.title = ok ? 'API GFW conectada' : 'Modo demo (sin API key)';
+    dot.title = ok ? 'AISStream conectado' : 'Sin conexión a AISStream';
   }
 
   function getStatusLabel(status) {
