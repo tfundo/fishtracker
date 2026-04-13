@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FishTracker — Seguimiento de Barcos Pesqueros</title>
+  <meta name="description" content="Aplicación de seguimiento en tiempo real de barcos pesqueros con datos de Global Fishing Watch." />
+
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+
+  <!-- App CSS -->
+  <link rel="stylesheet" href="style.css" />
+
+  <!-- Favicon inline SVG -->
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐟</text></svg>" />
+</head>
+<body>
+
+<!-- Barra de carga superior -->
+<div class="loading-bar" id="loadingBar"></div>
+
+<div class="app-layout">
+
+  <!-- ========== TOPBAR ========== -->
+  <header class="topbar">
+
+    <!-- Logo -->
+    <a class="topbar-logo" href="#">
+      <span class="logo-icon">🐟</span>
+      <h1>FishTracker <span>v1.0</span></h1>
+    </a>
+
+    <!-- Buscador -->
+    <div class="topbar-search">
+      <span class="search-icon">🔍</span>
+      <input
+        type="text"
+        id="searchInput"
+        placeholder="Buscar barco, puerto, MMSI, bandera…"
+        autocomplete="off"
+        spellcheck="false"
+      />
+      <div class="search-results" id="searchResults"></div>
+    </div>
+
+    <div class="topbar-spacer"></div>
+
+    <!-- Acciones -->
+    <div class="topbar-actions">
+      <div class="status-dot" id="apiStatus" title="Estado de la API"></div>
+
+      <button class="btn-icon" id="toggleSidebar" title="Mostrar/ocultar panel">☰</button>
+      <button class="btn-icon" id="toggleTheme"   title="Cambiar tema">🌙</button>
+      <button class="btn-icon" id="refreshBtn"    title="Actualizar datos">🔄</button>
+      <button class="btn-icon" id="centerMapBtn"  title="Centrar mapa">🌍</button>
+    </div>
+
+  </header>
+
+  <!-- ========== CONTENIDO PRINCIPAL ========== -->
+  <div class="main-content">
+
+    <!-- ===== SIDEBAR ===== -->
+    <aside class="sidebar" id="sidebar">
+
+      <!-- Stats rápidas -->
+      <div class="sidebar-section">
+        <h3>Resumen</h3>
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-value" id="statTotal">0</div>
+            <div class="stat-label">Barcos</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" id="statFishing">0</div>
+            <div class="stat-label">Pescando</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" id="statPorts">0</div>
+            <div class="stat-label">Puertos</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" id="statCountries">0</div>
+            <div class="stat-label">Países</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Filtros: Tipo de pesca -->
+      <div class="sidebar-section">
+        <h3>Tipo de Pesca</h3>
+        <div class="gear-filters" id="gearFilters"></div>
+      </div>
+
+      <!-- Filtros: Periodo -->
+      <div class="sidebar-section">
+        <h3>Periodo</h3>
+        <div class="period-filters" id="periodFilters"></div>
+      </div>
+
+      <!-- Opciones de capa -->
+      <div class="sidebar-section">
+        <h3>Capas del mapa</h3>
+        <div class="gear-filters">
+          <div class="gear-filter-item active" id="layerVessels" onclick="App.toggleLayer('vessels')">
+            <label>
+              <div class="custom-check"></div>
+              <span class="gear-filter-label">🚢 Barcos</span>
+            </label>
+          </div>
+          <div class="gear-filter-item active" id="layerHeatmap" onclick="App.toggleLayer('heatmap')">
+            <label>
+              <div class="custom-check"></div>
+              <span class="gear-filter-label">🔥 Mapa de calor</span>
+            </label>
+          </div>
+          <div class="gear-filter-item active" id="layerPorts" onclick="App.toggleLayer('ports')">
+            <label>
+              <div class="custom-check"></div>
+              <span class="gear-filter-label">⚓ Puertos</span>
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <!-- Lista de barcos -->
+      <div class="vessel-list-container" id="vesselList">
+        <div class="vessel-list-empty">
+          <div class="empty-icon">🌊</div>
+          <p>Cargando datos de barcos…<br/>Configura tu API key de GFW en <code>config.js</code></p>
+        </div>
+      </div>
+
+    </aside>
+
+    <!-- ===== MAPA ===== -->
+    <div style="position:relative; flex:1; overflow:hidden;">
+      <div id="map"></div>
+
+      <!-- Leyenda del mapa -->
+      <div class="map-legend">
+        <h5>Leyenda</h5>
+        <div id="legendItems"></div>
+        <div style="margin-top:10px;">
+          <div style="font-size:10px;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);margin-bottom:4px;">Intensidad pesca</div>
+          <div class="heatmap-gradient"></div>
+          <div class="heatmap-labels"><span>Baja</span><span>Alta</span></div>
+        </div>
+      </div>
+
+      <!-- Loader overlay -->
+      <div class="loader-overlay" id="loaderOverlay">
+        <div class="spinner"></div>
+        <p id="loaderText">Inicializando FishTracker…</p>
+      </div>
+    </div>
+
+  </div><!-- /main-content -->
+</div><!-- /app-layout -->
+
+<!-- Panel de detalle de barco -->
+<div class="info-panel" id="infoPanel">
+  <div class="info-panel-header">
+    <span class="vessel-icon" id="infoPanelIcon">🚢</span>
+    <div class="info-panel-header-text">
+      <h4 id="infoPanelName">—</h4>
+      <p  id="infoPanelSub">—</p>
+    </div>
+    <button class="info-panel-close" onclick="App.closeInfoPanel()">✕</button>
+  </div>
+  <div class="info-panel-body" id="infoPanelBody"></div>
+  <div class="info-panel-actions">
+    <button class="btn-sm btn-primary"   onclick="App.trackVessel()">📍 Seguir</button>
+    <button class="btn-sm btn-secondary" onclick="App.showHistory()">📈 Historial</button>
+  </div>
+</div>
+
+<!-- Contenedor de toasts -->
+<div class="toast-container" id="toastContainer"></div>
+
+<!-- Leaflet JS -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV/XN2GqF8=" crossorigin=""></script>
+
+<!-- Leaflet Heat plugin -->
+<script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+
+<!-- Config y App -->
+<script src="config.js"></script>
+<script src="app.js"></script>
+
+</body>
+</html>

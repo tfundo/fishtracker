@@ -1,0 +1,737 @@
+/* ============================================================
+   FishTracker — app.js
+   Lógica principal: mapa, API GFW, filtros, búsqueda, UI
+   ============================================================ */
+
+'use strict';
+
+const App = (() => {
+
+  // ──────────────────────────────────────────────
+  //  Estado global
+  // ──────────────────────────────────────────────
+  const state = {
+    map:           null,
+    tileLayer:     null,
+    vesselLayer:   null,   // LayerGroup de marcadores
+    heatLayer:     null,   // Leaflet.heat layer
+    portLayer:     null,   // LayerGroup de puertos
+    vessels:       [],     // Array de barcos cargados
+    filteredVessels: [],
+    selectedVessel: null,
+    trackedVessel:  null,
+    activeGears:   new Set(Object.keys(CONFIG.GEAR_TYPES)),
+    activePeriod:  'week',
+    layers: { vessels: true, heatmap: true, ports: true },
+    isDark:        true,
+    isLoading:     false,
+    apiAvailable:  false,
+  };
+
+  // ──────────────────────────────────────────────
+  //  Init
+  // ──────────────────────────────────────────────
+  function init() {
+    initMap();
+    buildGearFilters();
+    buildPeriodFilters();
+    buildLegend();
+    addPortMarkers();
+    setupSearch();
+    setupButtons();
+    loadVessels();
+  }
+
+  // ──────────────────────────────────────────────
+  //  Mapa
+  // ──────────────────────────────────────────────
+  function initMap() {
+    state.map = L.map('map', {
+      center:  CONFIG.MAP_CENTER,
+      zoom:    CONFIG.MAP_ZOOM,
+      minZoom: CONFIG.MAP_MIN_ZOOM,
+      maxZoom: CONFIG.MAP_MAX_ZOOM,
+      zoomControl: true,
+    });
+
+    state.tileLayer = L.tileLayer(CONFIG.TILE_DARK, {
+      attribution: CONFIG.TILE_DARK_ATTR,
+      maxZoom: 19,
+    }).addTo(state.map);
+
+    state.vesselLayer = L.layerGroup().addTo(state.map);
+    state.portLayer   = L.layerGroup().addTo(state.map);
+
+    // Click en el mapa: cerrar panel
+    state.map.on('click', () => closeInfoPanel());
+  }
+
+  // ──────────────────────────────────────────────
+  //  Filtros de tipo de pesca
+  // ──────────────────────────────────────────────
+  function buildGearFilters() {
+    const container = document.getElementById('gearFilters');
+    container.innerHTML = '';
+
+    Object.entries(CONFIG.GEAR_TYPES).forEach(([key, gear]) => {
+      const div = document.createElement('div');
+      div.className = 'gear-filter-item active';
+      div.dataset.gear = key;
+      div.innerHTML = `
+        <label>
+          <div class="custom-check"></div>
+          <span style="width:10px;height:10px;border-radius:50%;background:${gear.color};flex-shrink:0;display:inline-block;"></span>
+          <span class="gear-filter-label">${gear.icon} ${gear.label}</span>
+          <span class="gear-count" id="gearCount_${key}">0</span>
+        </label>`;
+      div.addEventListener('click', () => toggleGear(key, div));
+      container.appendChild(div);
+    });
+  }
+
+  function toggleGear(key, el) {
+    if (state.activeGears.has(key)) {
+      state.activeGears.delete(key);
+      el.classList.remove('active');
+    } else {
+      state.activeGears.add(key);
+      el.classList.add('active');
+    }
+    applyFilters();
+  }
+
+  // ──────────────────────────────────────────────
+  //  Filtros de periodo
+  // ──────────────────────────────────────────────
+  function buildPeriodFilters() {
+    const container = document.getElementById('periodFilters');
+    container.innerHTML = '';
+
+    Object.entries(CONFIG.PERIODS).forEach(([key, period]) => {
+      const btn = document.createElement('button');
+      btn.className = 'period-btn' + (key === state.activePeriod ? ' active' : '');
+      btn.textContent = period.label;
+      btn.dataset.period = key;
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        state.activePeriod = key;
+        loadVessels();
+      });
+      container.appendChild(btn);
+    });
+  }
+
+  // ──────────────────────────────────────────────
+  //  Leyenda
+  // ──────────────────────────────────────────────
+  function buildLegend() {
+    const container = document.getElementById('legendItems');
+    container.innerHTML = '';
+    Object.entries(CONFIG.GEAR_TYPES).forEach(([, gear]) => {
+      const div = document.createElement('div');
+      div.className = 'legend-item';
+      div.innerHTML = `<span class="legend-dot" style="background:${gear.color}"></span>${gear.icon} ${gear.label}`;
+      container.appendChild(div);
+    });
+  }
+
+  // ──────────────────────────────────────────────
+  //  Puertos
+  // ──────────────────────────────────────────────
+  function addPortMarkers() {
+    CONFIG.DEMO_PORTS.forEach(port => {
+      const icon = L.divIcon({
+        className: '',
+        html: '<div class="port-marker"></div>',
+        iconSize: [12, 12],
+        iconAnchor: [6, 6],
+      });
+
+      const marker = L.marker([port.lat, port.lon], { icon })
+        .bindPopup(`<b>⚓ ${port.name}</b><br/>${port.country}`)
+        .addTo(state.portLayer);
+
+      marker.on('click', (e) => { e.originalEvent.stopPropagation(); });
+    });
+
+    document.getElementById('statPorts').textContent = CONFIG.DEMO_PORTS.length;
+  }
+
+  // ──────────────────────────────────────────────
+  //  API Global Fishing Watch
+  // ──────────────────────────────────────────────
+  async function loadVessels() {
+    if (state.isLoading) return;
+
+    showLoader('Cargando datos de barcos…');
+    setLoadingBar(20);
+
+    const hasToken = CONFIG.GFW_TOKEN && CONFIG.GFW_TOKEN !== 'YOUR_GFW_API_TOKEN_HERE';
+
+    try {
+      let vessels;
+
+      if (hasToken) {
+        vessels = await fetchVesselsFromGFW();
+        state.apiAvailable = true;
+        setApiStatus(true);
+        toast('Datos cargados desde Global Fishing Watch', 'success');
+      } else {
+        // Modo demo con datos simulados
+        vessels = generateDemoVessels(120);
+        state.apiAvailable = false;
+        setApiStatus(false);
+        toast('Modo demo: configura tu API key de GFW en config.js', 'warning');
+      }
+
+      setLoadingBar(70);
+      state.vessels = vessels;
+      applyFilters();
+      setLoadingBar(100);
+
+    } catch (err) {
+      console.error('Error cargando barcos:', err);
+      toast('Error al cargar datos. Usando modo demo.', 'error');
+      state.vessels = generateDemoVessels(120);
+      applyFilters();
+    } finally {
+      hideLoader();
+      setTimeout(() => setLoadingBar(0), 400);
+    }
+  }
+
+  async function fetchVesselsFromGFW() {
+    const { days } = CONFIG.PERIODS[state.activePeriod];
+    const endDate   = new Date();
+    const startDate = new Date(endDate.getTime() - days * 86400000);
+
+    const gearTypes = [...state.activeGears]
+      .map(k => CONFIG.GEAR_TYPES[k]?.gfw)
+      .filter(Boolean)
+      .join(',');
+
+    const params = new URLSearchParams({
+      datasets:    'public-global-fishing-vessels:latest',
+      'start-date': startDate.toISOString().split('T')[0],
+      'end-date':   endDate.toISOString().split('T')[0],
+      ...(gearTypes ? { 'vessel-types': gearTypes } : {}),
+      limit: 100,
+      offset: 0,
+    });
+
+    const response = await fetch(
+      `${CONFIG.GFW_API_BASE}/${CONFIG.GFW_API_VERSION}/vessels/search?${params}`,
+      {
+        headers: {
+          'Authorization': `Bearer ${CONFIG.GFW_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`GFW API error: ${response.status} ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    return parseGFWVessels(data.entries || []);
+  }
+
+  function parseGFWVessels(entries) {
+    return entries.map(entry => {
+      const reg = entry.registryInfo?.[0] || {};
+      const pos = entry.lastPositionEventVisibility || {};
+      const gearKey = mapGFWGearToLocal(reg.vesselType || '');
+
+      return {
+        id:      entry.id || crypto.randomUUID(),
+        name:    reg.shipname || entry.id?.substring(0, 8) || 'Desconocido',
+        mmsi:    reg.mmsi || '—',
+        imo:     reg.imo  || '—',
+        flag:    reg.flag || '??',
+        gear:    gearKey,
+        status:  randomStatus(),
+        lat:     pos.lat  ?? (Math.random() * 160 - 80),
+        lon:     pos.lon  ?? (Math.random() * 360 - 180),
+        speed:   pos.speed ?? (Math.random() * 12).toFixed(1),
+        course:  pos.course ?? Math.floor(Math.random() * 360),
+        lastSeen: pos.timestamp ? new Date(pos.timestamp).toLocaleString('es-ES') : 'Hoy',
+      };
+    });
+  }
+
+  function mapGFWGearToLocal(type) {
+    const t = type.toLowerCase();
+    if (t.includes('trawl'))      return 'trawlers';
+    if (t.includes('purse'))      return 'purse_seines';
+    if (t.includes('longline') || t.includes('drifting_longlines')) return 'longliners';
+    if (t.includes('gillnet'))    return 'set_gillnets';
+    return Object.keys(CONFIG.GEAR_TYPES)[Math.floor(Math.random() * 4)];
+  }
+
+  // ──────────────────────────────────────────────
+  //  Datos demo (cuando no hay API key)
+  // ──────────────────────────────────────────────
+  function generateDemoVessels(count) {
+    const gearKeys = Object.keys(CONFIG.GEAR_TYPES);
+    const flags = ['ES','NO','JP','KR','CN','US','PT','FR','GB','AR','PE','CL','MA','SN','IS'];
+    const prefixes = ['Santa María','Galicia','Tritón','Mar Atlántico','Poseidón','Aurora','Estrella','Neptuno','Océano','Velero'];
+    const statuses = ['fishing','transit','transit','anchored'];
+
+    // Zonas de pesca reales aproximadas
+    const fishingZones = [
+      { lat: 48, lon: -10, radius: 8  },   // Atlántico NE
+      { lat: 65, lon:  0,  radius: 10 },   // Mar del Norte / Noruega
+      { lat: 35, lon: 140, radius: 12 },   // NW Pacífico
+      { lat: -5, lon: -35, radius: 8  },   // Brasil
+      { lat: 15, lon: -18, radius: 6  },   // África Occidental
+      { lat: -40,lon: -60, radius: 10 },   // Patagonia
+      { lat: 55, lon: 160, radius: 8  },   // Mar de Bering
+      { lat: 5,  lon:  60, radius: 7  },   // Océano Índico
+      { lat: 25, lon: -80, radius: 6  },   // Golfo de México
+      { lat: -10,lon: 100, radius: 9  },   // Asia SE
+    ];
+
+    return Array.from({ length: count }, (_, i) => {
+      const zone   = fishingZones[Math.floor(Math.random() * fishingZones.length)];
+      const gear   = gearKeys[Math.floor(Math.random() * gearKeys.length)];
+      const flag   = flags[Math.floor(Math.random() * flags.length)];
+      const prefix = prefixes[Math.floor(Math.random() * prefixes.length)];
+      const status = statuses[Math.floor(Math.random() * statuses.length)];
+
+      const angle  = Math.random() * 2 * Math.PI;
+      const dist   = Math.random() * zone.radius;
+      const lat    = zone.lat + dist * Math.cos(angle);
+      const lon    = zone.lon + dist * Math.sin(angle);
+
+      return {
+        id:      `DEMO-${i.toString().padStart(4,'0')}`,
+        name:    `${prefix} ${i + 1}`,
+        mmsi:    `${Math.floor(200000000 + Math.random() * 700000000)}`,
+        imo:     `IMO${Math.floor(1000000 + Math.random() * 9000000)}`,
+        flag,
+        gear,
+        status,
+        lat:     parseFloat(lat.toFixed(4)),
+        lon:     parseFloat(lon.toFixed(4)),
+        speed:   (status === 'anchored' ? 0 : (Math.random() * 12)).toFixed(1),
+        course:  Math.floor(Math.random() * 360),
+        lastSeen: `Hace ${Math.floor(Math.random() * 60)} min`,
+      };
+    });
+  }
+
+  function randomStatus() {
+    const s = ['fishing','fishing','transit','anchored'];
+    return s[Math.floor(Math.random() * s.length)];
+  }
+
+  // ──────────────────────────────────────────────
+  //  Aplicar filtros y renderizar
+  // ──────────────────────────────────────────────
+  function applyFilters() {
+    state.filteredVessels = state.vessels.filter(v => state.activeGears.has(v.gear));
+
+    // Actualizar contadores
+    Object.keys(CONFIG.GEAR_TYPES).forEach(key => {
+      const el = document.getElementById(`gearCount_${key}`);
+      if (el) el.textContent = state.vessels.filter(v => v.gear === key).length;
+    });
+
+    renderVesselList(state.filteredVessels);
+    renderVesselMarkers(state.filteredVessels);
+    renderHeatmap(state.filteredVessels);
+    updateStats(state.filteredVessels);
+  }
+
+  // ──────────────────────────────────────────────
+  //  Renderizar marcadores en el mapa
+  // ──────────────────────────────────────────────
+  function renderVesselMarkers(vessels) {
+    state.vesselLayer.clearLayers();
+
+    if (!state.layers.vessels) return;
+
+    vessels.forEach(vessel => {
+      const gear  = CONFIG.GEAR_TYPES[vessel.gear];
+      const color = gear?.color || '#888';
+
+      const icon = L.divIcon({
+        className: '',
+        html: `<div class="vessel-marker-icon" style="background:${color}22;border-color:${color};">${gear?.icon || '🚢'}</div>`,
+        iconSize:   [32, 32],
+        iconAnchor: [16, 16],
+        popupAnchor:[0, -18],
+      });
+
+      const marker = L.marker([vessel.lat, vessel.lon], { icon })
+        .bindPopup(buildPopupHTML(vessel), { maxWidth: 240 });
+
+      marker.on('click', (e) => {
+        e.originalEvent.stopPropagation();
+        selectVessel(vessel);
+      });
+
+      marker.addTo(state.vesselLayer);
+    });
+  }
+
+  function buildPopupHTML(v) {
+    const gear = CONFIG.GEAR_TYPES[v.gear];
+    return `
+      <div style="line-height:1.6">
+        <b>${gear?.icon || '🚢'} ${v.name}</b><br/>
+        <span style="color:var(--text-secondary);font-size:11px">
+          ${gear?.label || '—'} &bull; ${v.flag} &bull; ${getStatusLabel(v.status)}
+        </span><br/>
+        <span style="font-size:11px">📡 MMSI: ${v.mmsi}</span><br/>
+        <span style="font-size:11px">💨 Velocidad: ${v.speed} kn &bull; Rumbo: ${v.course}°</span>
+      </div>`;
+  }
+
+  // ──────────────────────────────────────────────
+  //  Mapa de calor
+  // ──────────────────────────────────────────────
+  function renderHeatmap(vessels) {
+    if (state.heatLayer) {
+      state.map.removeLayer(state.heatLayer);
+      state.heatLayer = null;
+    }
+
+    if (!state.layers.heatmap || vessels.length === 0) return;
+
+    const points = vessels.map(v => [v.lat, v.lon, v.status === 'fishing' ? 1.0 : 0.3]);
+
+    state.heatLayer = L.heatLayer(points, {
+      radius:  28,
+      blur:    20,
+      maxZoom: 10,
+      max:     1.0,
+      gradient: { 0.0: '#0000ff', 0.3: '#00ffff', 0.5: '#00ff00', 0.7: '#ffff00', 1.0: '#ff0000' },
+    }).addTo(state.map);
+  }
+
+  // ──────────────────────────────────────────────
+  //  Lista de barcos en sidebar
+  // ──────────────────────────────────────────────
+  function renderVesselList(vessels) {
+    const container = document.getElementById('vesselList');
+
+    if (vessels.length === 0) {
+      container.innerHTML = `
+        <div class="vessel-list-empty">
+          <div class="empty-icon">🔍</div>
+          <p>No se encontraron barcos<br/>con los filtros actuales.</p>
+        </div>`;
+      return;
+    }
+
+    container.innerHTML = vessels.map(v => buildVesselCardHTML(v)).join('');
+
+    // Eventos de clic en tarjetas
+    container.querySelectorAll('.vessel-card').forEach(card => {
+      card.addEventListener('click', () => {
+        const vessel = state.filteredVessels.find(v => v.id === card.dataset.id);
+        if (vessel) selectVessel(vessel);
+      });
+    });
+  }
+
+  function buildVesselCardHTML(v) {
+    const gear = CONFIG.GEAR_TYPES[v.gear];
+    return `
+      <div class="vessel-card ${state.selectedVessel?.id === v.id ? 'selected' : ''}" data-id="${v.id}">
+        <div class="vessel-card-header">
+          <span class="vessel-gear-icon">${gear?.icon || '🚢'}</span>
+          <span class="vessel-name">${v.name}</span>
+          <span class="vessel-status-badge ${v.status}">${getStatusLabel(v.status)}</span>
+        </div>
+        <div class="vessel-card-meta">
+          <span class="vessel-meta-item">🏳️ ${v.flag}</span>
+          <span class="vessel-meta-item">📡 ${v.mmsi}</span>
+          <span class="vessel-meta-item">💨 ${v.speed} kn</span>
+          <span class="vessel-meta-item">🕐 ${v.lastSeen}</span>
+        </div>
+      </div>`;
+  }
+
+  // ──────────────────────────────────────────────
+  //  Seleccionar barco
+  // ──────────────────────────────────────────────
+  function selectVessel(vessel) {
+    state.selectedVessel = vessel;
+
+    // Resaltar tarjeta
+    document.querySelectorAll('.vessel-card').forEach(c => {
+      c.classList.toggle('selected', c.dataset.id === vessel.id);
+    });
+
+    // Centrar mapa
+    state.map.setView([vessel.lat, vessel.lon], Math.max(state.map.getZoom(), 7), { animate: true });
+
+    // Abrir panel de info
+    openInfoPanel(vessel);
+  }
+
+  // ──────────────────────────────────────────────
+  //  Panel de información
+  // ──────────────────────────────────────────────
+  function openInfoPanel(vessel) {
+    const gear = CONFIG.GEAR_TYPES[vessel.gear];
+
+    document.getElementById('infoPanelIcon').textContent = gear?.icon || '🚢';
+    document.getElementById('infoPanelName').textContent = vessel.name;
+    document.getElementById('infoPanelSub').textContent  = `${gear?.label || '—'} • ${vessel.flag} • ${getStatusLabel(vessel.status)}`;
+
+    document.getElementById('infoPanelBody').innerHTML = `
+      <div class="info-row"><span class="info-key">MMSI</span>       <span class="info-val">${vessel.mmsi}</span></div>
+      <div class="info-row"><span class="info-key">IMO</span>        <span class="info-val">${vessel.imo || '—'}</span></div>
+      <div class="info-row"><span class="info-key">Bandera</span>    <span class="info-val">🏳️ ${vessel.flag}</span></div>
+      <div class="info-row"><span class="info-key">Tipo pesca</span> <span class="info-val">${gear?.label || '—'}</span></div>
+      <div class="info-row"><span class="info-key">Estado</span>     <span class="info-val">${getStatusLabel(vessel.status)}</span></div>
+      <div class="info-row"><span class="info-key">Velocidad</span>  <span class="info-val">${vessel.speed} kn</span></div>
+      <div class="info-row"><span class="info-key">Rumbo</span>      <span class="info-val">${vessel.course}°</span></div>
+      <div class="info-row"><span class="info-key">Latitud</span>    <span class="info-val">${vessel.lat.toFixed(4)}°</span></div>
+      <div class="info-row"><span class="info-key">Longitud</span>   <span class="info-val">${vessel.lon.toFixed(4)}°</span></div>
+      <div class="info-row"><span class="info-key">Última señal</span><span class="info-val">${vessel.lastSeen}</span></div>
+    `;
+
+    document.getElementById('infoPanel').classList.add('open');
+  }
+
+  function closeInfoPanel() {
+    document.getElementById('infoPanel').classList.remove('open');
+    state.selectedVessel = null;
+    document.querySelectorAll('.vessel-card').forEach(c => c.classList.remove('selected'));
+  }
+
+  function trackVessel() {
+    if (!state.selectedVessel) return;
+    state.trackedVessel = state.selectedVessel;
+    toast(`Siguiendo: ${state.selectedVessel.name}`, 'info');
+  }
+
+  function showHistory() {
+    if (!state.selectedVessel) return;
+    toast(`Historial de ${state.selectedVessel.name} (requiere API GFW)`, 'info');
+  }
+
+  // ──────────────────────────────────────────────
+  //  Capas toggle
+  // ──────────────────────────────────────────────
+  function toggleLayer(name) {
+    state.layers[name] = !state.layers[name];
+    const el = document.getElementById(`layer${name.charAt(0).toUpperCase() + name.slice(1)}`);
+    el?.classList.toggle('active', state.layers[name]);
+
+    if (name === 'vessels') renderVesselMarkers(state.filteredVessels);
+    if (name === 'heatmap') renderHeatmap(state.filteredVessels);
+    if (name === 'ports') {
+      if (state.layers.ports) state.portLayer.addTo(state.map);
+      else state.map.removeLayer(state.portLayer);
+    }
+  }
+
+  // ──────────────────────────────────────────────
+  //  Búsqueda
+  // ──────────────────────────────────────────────
+  function setupSearch() {
+    const input   = document.getElementById('searchInput');
+    const results = document.getElementById('searchResults');
+
+    input.addEventListener('input', debounce(() => {
+      const q = input.value.trim().toLowerCase();
+      if (q.length < 2) { results.classList.remove('open'); return; }
+      showSearchResults(q, results);
+    }, 250));
+
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { results.classList.remove('open'); input.blur(); }
+    });
+
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('.topbar-search')) results.classList.remove('open');
+    });
+  }
+
+  function showSearchResults(query, container) {
+    const vesselMatches = state.vessels.filter(v =>
+      v.name.toLowerCase().includes(query) ||
+      v.mmsi.includes(query) ||
+      v.flag.toLowerCase().includes(query) ||
+      (v.imo && v.imo.toLowerCase().includes(query))
+    ).slice(0, 6);
+
+    const portMatches = CONFIG.DEMO_PORTS.filter(p =>
+      p.name.toLowerCase().includes(query) ||
+      p.country.toLowerCase().includes(query)
+    ).slice(0, 3);
+
+    if (vesselMatches.length === 0 && portMatches.length === 0) {
+      container.innerHTML = `<div class="search-result-item"><span class="result-icon">🔍</span><div class="result-info"><div class="result-name">Sin resultados</div><div class="result-sub">Prueba con otro nombre o MMSI</div></div></div>`;
+      container.classList.add('open');
+      return;
+    }
+
+    let html = '';
+
+    vesselMatches.forEach(v => {
+      const gear = CONFIG.GEAR_TYPES[v.gear];
+      html += `
+        <div class="search-result-item" data-type="vessel" data-id="${v.id}">
+          <span class="result-icon">${gear?.icon || '🚢'}</span>
+          <div class="result-info">
+            <div class="result-name">${highlight(v.name, query)}</div>
+            <div class="result-sub">MMSI ${v.mmsi} · ${v.flag} · ${gear?.label}</div>
+          </div>
+          <span class="result-type-badge">Barco</span>
+        </div>`;
+    });
+
+    portMatches.forEach(p => {
+      html += `
+        <div class="search-result-item" data-type="port" data-lat="${p.lat}" data-lon="${p.lon}">
+          <span class="result-icon">⚓</span>
+          <div class="result-info">
+            <div class="result-name">${highlight(p.name, query)}</div>
+            <div class="result-sub">${p.country}</div>
+          </div>
+          <span class="result-type-badge">Puerto</span>
+        </div>`;
+    });
+
+    container.innerHTML = html;
+    container.classList.add('open');
+
+    container.querySelectorAll('.search-result-item').forEach(item => {
+      item.addEventListener('click', () => {
+        container.classList.remove('open');
+        document.getElementById('searchInput').value = '';
+
+        if (item.dataset.type === 'vessel') {
+          const v = state.vessels.find(v => v.id === item.dataset.id);
+          if (v) {
+            // Asegurar que el gear está activo
+            if (!state.activeGears.has(v.gear)) {
+              state.activeGears.add(v.gear);
+              applyFilters();
+            }
+            selectVessel(v);
+          }
+        } else if (item.dataset.type === 'port') {
+          state.map.setView([+item.dataset.lat, +item.dataset.lon], 10, { animate: true });
+        }
+      });
+    });
+  }
+
+  function highlight(text, query) {
+    const regex = new RegExp(`(${escapeRegex(query)})`, 'gi');
+    return text.replace(regex, '<mark style="background:var(--accent-glow);color:var(--accent);border-radius:2px;padding:0 2px;">$1</mark>');
+  }
+
+  function escapeRegex(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+  // ──────────────────────────────────────────────
+  //  Botones
+  // ──────────────────────────────────────────────
+  function setupButtons() {
+    document.getElementById('toggleSidebar').addEventListener('click', () => {
+      document.getElementById('sidebar').classList.toggle('collapsed');
+    });
+
+    document.getElementById('toggleTheme').addEventListener('click', () => {
+      state.isDark = !state.isDark;
+      document.body.classList.toggle('light-mode', !state.isDark);
+      document.getElementById('toggleTheme').textContent = state.isDark ? '🌙' : '☀️';
+
+      // Cambiar tile layer
+      state.map.removeLayer(state.tileLayer);
+      state.tileLayer = L.tileLayer(
+        state.isDark ? CONFIG.TILE_DARK : CONFIG.TILE_LIGHT,
+        { attribution: state.isDark ? CONFIG.TILE_DARK_ATTR : CONFIG.TILE_LIGHT_ATTR, maxZoom: 19 }
+      ).addTo(state.map);
+    });
+
+    document.getElementById('refreshBtn').addEventListener('click', () => {
+      loadVessels();
+    });
+
+    document.getElementById('centerMapBtn').addEventListener('click', () => {
+      state.map.setView(CONFIG.MAP_CENTER, CONFIG.MAP_ZOOM, { animate: true });
+    });
+  }
+
+  // ──────────────────────────────────────────────
+  //  Stats
+  // ──────────────────────────────────────────────
+  function updateStats(vessels) {
+    document.getElementById('statTotal').textContent    = vessels.length;
+    document.getElementById('statFishing').textContent  = vessels.filter(v => v.status === 'fishing').length;
+    document.getElementById('statCountries').textContent = new Set(vessels.map(v => v.flag)).size;
+  }
+
+  // ──────────────────────────────────────────────
+  //  UI helpers
+  // ──────────────────────────────────────────────
+  function showLoader(text = 'Cargando…') {
+    state.isLoading = true;
+    document.getElementById('loaderText').textContent = text;
+    document.getElementById('loaderOverlay').classList.remove('hidden');
+  }
+
+  function hideLoader() {
+    state.isLoading = false;
+    document.getElementById('loaderOverlay').classList.add('hidden');
+  }
+
+  function setLoadingBar(pct) {
+    document.getElementById('loadingBar').style.width = `${pct}%`;
+  }
+
+  function setApiStatus(ok) {
+    const dot = document.getElementById('apiStatus');
+    dot.style.background = ok ? 'var(--success)' : 'var(--warning)';
+    dot.title = ok ? 'API GFW conectada' : 'Modo demo (sin API key)';
+  }
+
+  function getStatusLabel(status) {
+    return { fishing: '🎣 Pescando', transit: '⛵ En tránsito', anchored: '⚓ Fondeado' }[status] || status;
+  }
+
+  function toast(message, type = 'info', duration = 4000) {
+    const icons = { info: 'ℹ️', success: '✅', warning: '⚠️', error: '❌' };
+    const container = document.getElementById('toastContainer');
+    const el = document.createElement('div');
+    el.className = `toast ${type}`;
+    el.innerHTML = `<span class="toast-icon">${icons[type]}</span><span class="toast-message">${message}</span>`;
+    container.appendChild(el);
+
+    setTimeout(() => {
+      el.classList.add('removing');
+      setTimeout(() => el.remove(), 300);
+    }, duration);
+  }
+
+  function debounce(fn, ms) {
+    let timer;
+    return (...args) => { clearTimeout(timer); timer = setTimeout(() => fn(...args), ms); };
+  }
+
+  // ──────────────────────────────────────────────
+  //  API pública del módulo
+  // ──────────────────────────────────────────────
+  return {
+    init,
+    toggleLayer,
+    closeInfoPanel,
+    trackVessel,
+    showHistory,
+    toast,
+  };
+
+})();
+
+// Arrancar cuando el DOM esté listo
+document.addEventListener('DOMContentLoaded', App.init);

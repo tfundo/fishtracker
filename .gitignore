@@ -1,0 +1,20 @@
+# Sistema operativo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editores
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Node (por si se añade en el futuro)
+node_modules/
+npm-debug.log*
+
+# Variables de entorno (¡nunca subir tokens!)
+.env
+.env.local
+secrets.js
