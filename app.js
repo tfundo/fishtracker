@@ -167,33 +167,20 @@ const App = (() => {
     showLoader('Cargando datos de barcos…');
     setLoadingBar(20);
 
-    const hasToken = CONFIG.GFW_TOKEN && CONFIG.GFW_TOKEN !== 'YOUR_GFW_API_TOKEN_HERE';
-
     try {
-      let vessels;
-
-      if (hasToken) {
-        vessels = await fetchVesselsFromGFW();
-        state.apiAvailable = true;
-        setApiStatus(true);
-        toast('Datos cargados desde Global Fishing Watch', 'success');
-      } else {
-        // Modo demo con datos simulados
-        vessels = generateDemoVessels(120);
-        state.apiAvailable = false;
-        setApiStatus(false);
-        toast('Modo demo: configura tu API key de GFW en config.js', 'warning');
-      }
-
+      const vessels = await fetchVesselsFromGFW();
+      state.apiAvailable = true;
+      setApiStatus(true);
       setLoadingBar(70);
       state.vessels = vessels;
       applyFilters();
       setLoadingBar(100);
-
+      toast('Datos cargados desde Global Fishing Watch', 'success');
     } catch (err) {
       console.error('Error cargando barcos:', err);
-      toast('Error al cargar datos. Usando modo demo.', 'error');
-      state.vessels = generateDemoVessels(120);
+      setApiStatus(false);
+      toast(`Error al conectar con GFW: ${err.message}`, 'error');
+      state.vessels = [];
       applyFilters();
     } finally {
       hideLoader();
@@ -268,63 +255,6 @@ const App = (() => {
     if (t.includes('longline') || t.includes('drifting_longlines')) return 'longliners';
     if (t.includes('gillnet'))    return 'set_gillnets';
     return Object.keys(CONFIG.GEAR_TYPES)[Math.floor(Math.random() * 4)];
-  }
-
-  // ──────────────────────────────────────────────
-  //  Datos demo (cuando no hay API key)
-  // ──────────────────────────────────────────────
-  function generateDemoVessels(count) {
-    const gearKeys = Object.keys(CONFIG.GEAR_TYPES);
-    const flags = ['ES','NO','JP','KR','CN','US','PT','FR','GB','AR','PE','CL','MA','SN','IS'];
-    const prefixes = ['Santa María','Galicia','Tritón','Mar Atlántico','Poseidón','Aurora','Estrella','Neptuno','Océano','Velero'];
-    const statuses = ['fishing','transit','transit','anchored'];
-
-    // Zonas de pesca reales aproximadas
-    const fishingZones = [
-      { lat: 48, lon: -10, radius: 8  },   // Atlántico NE
-      { lat: 65, lon:  0,  radius: 10 },   // Mar del Norte / Noruega
-      { lat: 35, lon: 140, radius: 12 },   // NW Pacífico
-      { lat: -5, lon: -35, radius: 8  },   // Brasil
-      { lat: 15, lon: -18, radius: 6  },   // África Occidental
-      { lat: -40,lon: -60, radius: 10 },   // Patagonia
-      { lat: 55, lon: 160, radius: 8  },   // Mar de Bering
-      { lat: 5,  lon:  60, radius: 7  },   // Océano Índico
-      { lat: 25, lon: -80, radius: 6  },   // Golfo de México
-      { lat: -10,lon: 100, radius: 9  },   // Asia SE
-    ];
-
-    return Array.from({ length: count }, (_, i) => {
-      const zone   = fishingZones[Math.floor(Math.random() * fishingZones.length)];
-      const gear   = gearKeys[Math.floor(Math.random() * gearKeys.length)];
-      const flag   = flags[Math.floor(Math.random() * flags.length)];
-      const prefix = prefixes[Math.floor(Math.random() * prefixes.length)];
-      const status = statuses[Math.floor(Math.random() * statuses.length)];
-
-      const angle  = Math.random() * 2 * Math.PI;
-      const dist   = Math.random() * zone.radius;
-      const lat    = zone.lat + dist * Math.cos(angle);
-      const lon    = zone.lon + dist * Math.sin(angle);
-
-      return {
-        id:      `DEMO-${i.toString().padStart(4,'0')}`,
-        name:    `${prefix} ${i + 1}`,
-        mmsi:    `${Math.floor(200000000 + Math.random() * 700000000)}`,
-        imo:     `IMO${Math.floor(1000000 + Math.random() * 9000000)}`,
-        flag,
-        gear,
-        status,
-        lat:     parseFloat(lat.toFixed(4)),
-        lon:     parseFloat(lon.toFixed(4)),
-        speed:   (status === 'anchored' ? 0 : (Math.random() * 12)).toFixed(1),
-        course:  Math.floor(Math.random() * 360),
-        lastSeen: `Hace ${Math.floor(Math.random() * 60)} min`,
-      };
-    });
-  }
-
-  function randomStatus() {
-    const s = ['fishing','fishing','transit','anchored'];
-    return s[Math.floor(Math.random() * s.length)];
   }
 
   // ──────────────────────────────────────────────
