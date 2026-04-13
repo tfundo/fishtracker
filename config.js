@@ -8,7 +8,7 @@ const CONFIG = {
   GFW_API_BASE: 'https://gateway.api.globalfishingwatch.org',
   GFW_API_VERSION: 'v3',
   // Reemplaza con tu token de GFW (registro gratuito en globalfishingwatch.org)
-  GFW_TOKEN: 'YOUR_GFW_API_TOKEN_HERE',
+  GFW_TOKEN: '80e4d5513c36e34d2ed75ae3f0a5a2b0cafc31f3',
 
   // ---------- Mapa ----------
   MAP_CENTER: [20, 0],
