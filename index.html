@@ -7,7 +7,7 @@
   <meta name="description" content="Aplicación de seguimiento en tiempo real de barcos pesqueros con datos de Global Fishing Watch." />
 
   <!-- Leaflet CSS -->
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 
   <!-- App CSS -->
   <link rel="stylesheet" href="style.css" />
@@ -135,7 +135,7 @@
     </aside>
 
     <!-- ===== MAPA ===== -->
-    <div style="position:relative; flex:1; overflow:hidden;">
+    <div style="position:relative; flex:1; overflow:hidden; display:flex; flex-direction:column;">
       <div id="map"></div>
 
       <!-- Leyenda del mapa -->
@@ -180,7 +180,7 @@
 <div class="toast-container" id="toastContainer"></div>
 
 <!-- Leaflet JS -->
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV/XN2GqF8=" crossorigin=""></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
 <!-- Leaflet Heat plugin -->
 <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>

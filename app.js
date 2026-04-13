@@ -400,6 +400,7 @@ const App = (() => {
     }
 
     if (!state.layers.heatmap || vessels.length === 0) return;
+    if (typeof L.heatLayer !== 'function') return; // plugin no disponible
 
     const points = vessels.map(v => [v.lat, v.lon, v.status === 'fishing' ? 1.0 : 0.3]);
 
@@ -734,4 +735,14 @@ const App = (() => {
 })();
 
 // Arrancar cuando el DOM esté listo
-document.addEventListener('DOMContentLoaded', App.init);
+document.addEventListener('DOMContentLoaded', () => {
+  try {
+    App.init();
+  } catch (err) {
+    console.error('Error crítico en la inicialización:', err);
+    const overlay = document.getElementById('loaderOverlay');
+    const text    = document.getElementById('loaderText');
+    if (text)    text.textContent = 'Error al cargar. Revisa la consola (F12).';
+    if (overlay) overlay.classList.remove('hidden');
+  }
+});
