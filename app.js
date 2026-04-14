@@ -16,20 +16,18 @@ const App = (() => {
     vesselLayer:      null,
     heatLayer:        null,
     portLayer:        null,
-    vesselMap:        new Map(),   // mmsi → vessel object (fuente de verdad)
-    vessels:          [],          // array derivado de vesselMap tras filtros
-    filteredVessels:  [],
-    selectedVessel:   null,
-    trackedVessel:    null,
-    activeGears:      new Set(Object.keys(CONFIG.GEAR_TYPES)),
-    activePeriod:     'week',
-    layers:           { vessels: true, heatmap: true, ports: true },
-    isDark:           true,
-    isLoading:        false,
-    apiAvailable:     false,
-    ws:               null,        // WebSocket AISStream
-    wsReconnectTimer: null,
-    uiUpdateTimer:    null,        // debounce para re-render
+    vesselMap:       new Map(),   // mmsi/id → vessel object
+    vessels:         [],
+    filteredVessels: [],
+    selectedVessel:  null,
+    trackedVessel:   null,
+    activeGears:     new Set(Object.keys(CONFIG.GEAR_TYPES)),
+    activePeriod:    'today',
+    layers:          { vessels: true, heatmap: true, ports: true },
+    isDark:          true,
+    isLoading:       false,
+    apiAvailable:    false,
+    refreshTimer:    null,
   };
 
   // ──────────────────────────────────────────────
@@ -43,8 +41,8 @@ const App = (() => {
     addPortMarkers();
     setupSearch();
     setupButtons();
-    connectAISStream();
-    startPruneTimer();
+    setupMapRefresh();
+    loadVessels();
   }
 
   // ──────────────────────────────────────────────
@@ -121,7 +119,7 @@ const App = (() => {
         document.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         state.activePeriod = key;
-        applyFilters();
+        loadVessels();
       });
       container.appendChild(btn);
     });
@@ -164,187 +162,164 @@ const App = (() => {
   }
 
   // ──────────────────────────────────────────────
-  //  AISStream — WebSocket en tiempo real
+  //  VesselAPI — REST
   // ──────────────────────────────────────────────
-  function connectAISStream() {
-    clearTimeout(state.wsReconnectTimer);
 
-    if (state.ws) {
-      state.ws.onclose = null;  // evitar reconexión automática al cerrar manualmente
-      state.ws.close();
-      state.ws = null;
-    }
-
-    showLoader('Conectando a AISStream…');
+  // Carga barcos: limpia el mapa y consulta las zonas relevantes
+  async function loadVessels() {
+    if (state.isLoading) return;
+    showLoader('Consultando VesselAPI…');
+    setLoadingBar(15);
 
     try {
-      state.ws = new WebSocket(CONFIG.AISSTREAM_WS);
-    } catch (e) {
-      toast('WebSocket no soportado en este navegador', 'error');
-      hideLoader();
-      return;
-    }
+      const tiles   = getQueryTiles();
+      const results = await Promise.allSettled(tiles.map(queryBoundingBox));
 
-    state.ws.onopen = () => {
-      state.ws.send(JSON.stringify({
-        APIKey:             CONFIG.AISSTREAM_TOKEN,
-        BoundingBoxes:      [[[-90, -180], [90, 180]]],
-        FilterMessageTypes: ['PositionReport', 'ShipStaticData'],
-      }));
+      state.vesselMap.clear();
+      let count = 0;
+
+      results.forEach(r => {
+        if (r.status !== 'fulfilled') return;
+        (r.value || []).forEach(v => {
+          if (!isFishingVessel(v)) return;
+          const parsed = parseVesselAPIVessel(v);
+          if (parsed.lat === 0 && parsed.lon === 0) return; // sin posición
+          state.vesselMap.set(parsed.id, parsed);
+          count++;
+        });
+      });
+
       setApiStatus(true);
-      hideLoader();
-      toast('Conectado a AISStream — datos en tiempo real', 'success');
-    };
+      setLoadingBar(80);
+      applyFilters();
+      setLoadingBar(100);
+      toast(`${count} barcos pesqueros cargados`, count > 0 ? 'success' : 'info');
 
-    state.ws.onmessage = (evt) => {
-      try { handleAISMessage(JSON.parse(evt.data)); } catch (_) {}
-    };
-
-    state.ws.onerror = () => {
+    } catch (err) {
+      console.error('VesselAPI error:', err);
       setApiStatus(false);
+      toast(`Error VesselAPI: ${err.message}`, 'error');
+    } finally {
       hideLoader();
-    };
+      setTimeout(() => setLoadingBar(0), 400);
+    }
+  }
 
-    state.ws.onclose = () => {
-      setApiStatus(false);
-      toast('Conexión perdida. Reconectando en 5 s…', 'warning');
-      state.wsReconnectTimer = setTimeout(connectAISStream, 5000);
+  // Devuelve los tiles a consultar según el zoom actual
+  function getQueryTiles() {
+    const zoom = state.map.getZoom();
+
+    // Zoom bajo → usar zonas pesqueras predefinidas (globales)
+    if (zoom < 7) return CONFIG.FISHING_ZONES;
+
+    // Zoom alto → tilelar el área visible en celdas de 4° (máx 9 tiles)
+    const b = state.map.getBounds();
+    return tileBounds(
+      b.getSouth(), b.getNorth(),
+      b.getWest(),  b.getEast(),
+      4, 9
+    );
+  }
+
+  // Divide un rectángulo en celdas de maxDeg°, devuelve hasta maxTiles celdas
+  function tileBounds(south, north, west, east, maxDeg, maxTiles) {
+    const tiles = [];
+    for (let lat = Math.floor(south / maxDeg) * maxDeg; lat < north; lat += maxDeg) {
+      for (let lon = Math.floor(west / maxDeg) * maxDeg; lon < east; lon += maxDeg) {
+        tiles.push({
+          latBottom: Math.max(-90,  lat),
+          latTop:    Math.min( 90,  lat + maxDeg),
+          lonLeft:   Math.max(-180, lon),
+          lonRight:  Math.min( 180, lon + maxDeg),
+        });
+        if (tiles.length >= maxTiles) return tiles;
+      }
+    }
+    return tiles.length ? tiles : CONFIG.FISHING_ZONES;
+  }
+
+  // Una llamada REST a /location/vessels/bounding-box
+  async function queryBoundingBox(tile) {
+    const { hours } = CONFIG.PERIODS[state.activePeriod];
+    const timeTo   = new Date();
+    const timeFrom = new Date(timeTo.getTime() - hours * 3600000);
+
+    const params = new URLSearchParams({
+      latBottom:          tile.latBottom.toFixed(4),
+      latTop:             tile.latTop.toFixed(4),
+      lonLeft:            tile.lonLeft.toFixed(4),
+      lonRight:           tile.lonRight.toFixed(4),
+      'time.from':        timeFrom.toISOString(),
+      'time.to':          timeTo.toISOString(),
+      'pagination.limit': '50',
+    });
+
+    const res = await fetch(
+      `${CONFIG.VESSELAPI_BASE}/location/vessels/bounding-box?${params}`,
+      { headers: { 'Authorization': `Bearer ${CONFIG.VESSELAPI_TOKEN}` } }
+    );
+
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    const data = await res.json();
+    return data.vessels || data.vesselPositions || [];
+  }
+
+  // ¿Es este barco un pesquero?
+  function isFishingVessel(v) {
+    const type      = String(v.type || v.vesselType || v.shipType || '').toLowerCase();
+    const navStatus = v.position?.nav_status ?? v.navStatus ?? -1;
+    if (type.includes('fish')) return true;
+    if (type === '30')         return true;
+    if (navStatus === 7)       return true;
+    return false;
+  }
+
+  // Convierte respuesta VesselAPI → objeto interno
+  function parseVesselAPIVessel(v) {
+    const pos = v.position || {};
+    const id  = String(v.mmsi || v.id || Math.random());
+    return {
+      id,
+      name:     v.name || `MMSI ${id}`,
+      mmsi:     v.mmsi || '—',
+      imo:      v.imo  ? `IMO${v.imo}` : '—',
+      flag:     v.flag || v.countryCode || '??',
+      gear:     detectGearFromName(v.name || ''),
+      status:   mapNavStatus(pos.nav_status ?? -1),
+      lat:      pos.latitude  ?? 0,
+      lon:      pos.longitude ?? 0,
+      speed:    (pos.sog ?? 0).toFixed(1),
+      course:   Math.round(pos.cog ?? 0),
+      lastSeen: pos.timestamp
+                  ? new Date(pos.timestamp).toLocaleTimeString('es-ES')
+                  : new Date().toLocaleTimeString('es-ES'),
+      lastTs:   Date.now(),
     };
   }
 
-  // Tipos AIS confirmados como NO pesqueros → eliminar del mapa al recibirlos
-  const NON_FISHING_TYPES = new Set([
-    60,61,62,63,64,65,66,67,68,69,   // Pasajeros
-    70,71,72,73,74,75,76,77,78,79,   // Carga
-    80,81,82,83,84,85,86,87,88,89,   // Tanqueros
-    31,32,33,34,35,36,37,            // Remolque, militar, vela, recreo
-    50,51,52,53,54,55,56,57,58,59,   // Servicios especiales
-  ]);
-
-  function handleAISMessage(msg) {
-    const meta = msg.MetaData || {};
-    const mmsi = String(meta.MMSI || '');
-    if (!mmsi) return;
-
-    const now = Date.now();
-
-    // ── PositionReport ─────────────────────────────────────────────────────
-    if (msg.MessageType === 'PositionReport') {
-      const pos = msg.Message?.PositionReport || {};
-      const lat = pos.Latitude;
-      const lon = pos.Longitude;
-
-      // Descartar coordenadas inválidas o nulas (0,0 es el Mar de Guinea, válido)
-      if (lat == null || lon == null) return;
-      if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return;
-
-      const status   = mapNavStatus(pos.NavigationalStatus ?? -1);
-      const existing = state.vesselMap.get(mmsi);
-
-      if (existing) {
-        // Actualizar barco ya en el mapa
-        existing.lat      = lat;
-        existing.lon      = lon;
-        existing.speed    = (pos.Sog ?? existing.speed).toFixed(1);
-        existing.course   = Math.round(pos.Cog ?? existing.course);
-        existing.status   = status;
-        existing.lastSeen = new Date().toLocaleTimeString('es-ES');
-        existing.lastTs   = now;
-      } else {
-        // Añadir todos los barcos inmediatamente.
-        // Los no pesqueros se eliminarán cuando llegue su ShipStaticData.
-        state.vesselMap.set(mmsi, {
-          id:       mmsi,
-          mmsi,
-          name:     meta.ShipName?.trim() || `MMSI ${mmsi}`,
-          imo:      '—',
-          flag:     '??',
-          gear:     detectGearFromName(meta.ShipName || ''),
-          status,
-          lat, lon,
-          speed:    (pos.Sog ?? 0).toFixed(1),
-          course:   Math.round(pos.Cog ?? 0),
-          lastSeen: new Date().toLocaleTimeString('es-ES'),
-          lastTs:   now,
-        });
-
-        // Cap: máx 3000 barcos en pantalla — eliminar los más antiguos
-        if (state.vesselMap.size > 3000) {
-          const oldest = [...state.vesselMap.entries()]
-            .sort((a, b) => a[1].lastTs - b[1].lastTs)[0];
-          if (oldest) state.vesselMap.delete(oldest[0]);
-        }
-      }
-
-    // ── ShipStaticData ──────────────────────────────────────────────────────
-    } else if (msg.MessageType === 'ShipStaticData') {
-      const ship = msg.Message?.ShipStaticData || {};
-      const type = ship.Type ?? 0;
-
-      if (NON_FISHING_TYPES.has(type)) {
-        // Confirmado como NO pesquero → eliminar del mapa
-        state.vesselMap.delete(mmsi);
-        return;
-      }
-
-      // Tipo 30 (pesquero) o tipo desconocido (0) → enriquecer datos
-      const existing = state.vesselMap.get(mmsi);
-      if (existing) {
-        existing.name   = ship.Name?.trim() || existing.name;
-        existing.imo    = ship.Imo ? `IMO${ship.Imo}` : existing.imo;
-        existing.gear   = detectGearFromName(existing.name) || 'trawlers';
-        existing.lastTs = now;
-      }
-    }
-
-    scheduleUIUpdate();
+  // Re-consulta cuando el mapa se mueve (debounced) y auto-refresca cada 5 min
+  function setupMapRefresh() {
+    const debouncedLoad = debounce(loadVessels, 1500);
+    state.map.on('moveend', debouncedLoad);
+    state.map.on('zoomend', debouncedLoad);
+    state.refreshTimer = setInterval(loadVessels, 5 * 60 * 1000);
   }
 
   // Detecta arte de pesca por el nombre del barco
   function detectGearFromName(name) {
-    const n = name.toLowerCase();
-    if (n.includes('trawl') || n.includes('arrastre'))                   return 'trawlers';
-    if (n.includes('seine') || n.includes('seiner') || n.includes('cerco')) return 'purse_seines';
-    if (n.includes('longlin') || n.includes('long line') || n.includes('palangre')) return 'longliners';
-    if (n.includes('gillnet') || n.includes('gill net') || n.includes('enmalle'))   return 'set_gillnets';
-    return 'trawlers'; // arte más común — default seguro
+    const n = (name || '').toLowerCase();
+    if (n.includes('trawl')   || n.includes('arrastre'))  return 'trawlers';
+    if (n.includes('seine')   || n.includes('cerco'))     return 'purse_seines';
+    if (n.includes('longlin') || n.includes('palangre'))  return 'longliners';
+    if (n.includes('gillnet') || n.includes('enmalle'))   return 'set_gillnets';
+    return 'trawlers';
   }
 
-  // Detecta arte de pesca por tipo AIS (tipo 30 = pesquero genérico)
-  function detectGearFromType(type) {
-    if (type === 30) return 'trawlers';
-    return null;
-  }
-
-  // Mapea NavigationalStatus AIS → estado interno
+  // Mapea nav_status AIS → estado interno
   function mapNavStatus(n) {
-    if (n === 1)  return 'anchored';
-    if (n === 7)  return 'fishing';
+    if (n === 1) return 'anchored';
+    if (n === 7) return 'fishing';
     return 'transit';
-  }
-
-  // Actualiza la UI máximo 1 vez cada 2 s para no bloquear el navegador
-  function scheduleUIUpdate() {
-    if (state.uiUpdateTimer) return;
-    state.uiUpdateTimer = setTimeout(() => {
-      state.uiUpdateTimer = null;
-      applyFilters();
-    }, 2000);
-  }
-
-  // Elimina barcos que llevan más tiempo del umbral sin emitir señal
-  function startPruneTimer() {
-    setInterval(() => {
-      const { inactiveMs } = CONFIG.PERIODS[state.activePeriod];
-      if (!inactiveMs) return;  // 0 = mantener toda la sesión
-
-      const cutoff = Date.now() - inactiveMs;
-      let pruned = false;
-      state.vesselMap.forEach((v, mmsi) => {
-        if (v.lastTs < cutoff) { state.vesselMap.delete(mmsi); pruned = true; }
-      });
-      if (pruned) applyFilters();
-    }, 60_000);  // revisar cada minuto
   }
 
   // ──────────────────────────────────────────────
@@ -678,8 +653,7 @@ const App = (() => {
     });
 
     document.getElementById('refreshBtn').addEventListener('click', () => {
-      state.vesselMap.clear();
-      connectAISStream();
+      loadVessels();
     });
 
     document.getElementById('centerMapBtn').addEventListener('click', () => {
@@ -717,7 +691,7 @@ const App = (() => {
   function setApiStatus(ok) {
     const dot = document.getElementById('apiStatus');
     dot.style.background = ok ? 'var(--success)' : 'var(--warning)';
-    dot.title = ok ? 'AISStream conectado' : 'Sin conexión a AISStream';
+    dot.title = ok ? 'VesselAPI conectada' : 'Sin conexión a VesselAPI';
   }
 
   function getStatusLabel(status) {
