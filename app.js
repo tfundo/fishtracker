@@ -163,7 +163,6 @@ const App = (() => {
   // ──────────────────────────────────────────────
   let _ws               = null;
   let _wsReconnectTimer = null;
-  let _wsPingTimer      = null;
 
   // Mapa MID (3 primeros dígitos MMSI) → bandera
   const MID_TO_FLAG = {
@@ -238,8 +237,7 @@ const App = (() => {
     // Cancelar reconexión pendiente si la hay
     if (_wsReconnectTimer) { clearTimeout(_wsReconnectTimer); _wsReconnectTimer = null; }
 
-    // Cancelar keepalive y cerrar conexión anterior limpiamente
-    if (_wsPingTimer) { clearInterval(_wsPingTimer); _wsPingTimer = null; }
+    // Cerrar conexión anterior limpiamente
     if (_ws) {
       _ws.onclose = null;
       _ws.close();
@@ -253,35 +251,19 @@ const App = (() => {
     showLoadingBar(20);
     setApiStatus(false);
 
-    _ws = new WebSocket(CONFIG.AISSTREAM_WS_URL);
+    // Conectar al Worker proxy — el Worker gestiona la suscripción, API key y keepalive
+    const wsUrl = `${CONFIG.WORKER_WS_URL}/aisstream?s=${s.toFixed(4)}&w=${w.toFixed(4)}&n=${n.toFixed(4)}&e=${e.toFixed(4)}`;
+    console.log('[AISStream] conectando via Worker:', wsUrl);
+    _ws = new WebSocket(wsUrl);
 
     _ws.onopen = () => {
-      const subscription = {
-        APIKey: CONFIG.AISSTREAM_API_KEY,
-        BoundingBoxes: [[[s, w], [n, e]]],
-        FilterMessageTypes: [
-          'PositionReport',               // Class A (grandes)
-          'StandardClassBPositionReport', // Class B (pesqueros pequeños)
-          'ShipStaticData',               // Nombre/tipo Class A
-          'StaticDataReport',             // Nombre/tipo Class B
-        ],
-      };
-      console.log('[AISStream] enviando suscripción:', JSON.stringify(subscription));
-      _ws.send(JSON.stringify(subscription));
       setApiStatus(true);
       showLoadingBar(100);
       setTimeout(() => showLoadingBar(0), 400);
-
-      // Keepalive cada 20s — el servidor cierra la conexión (1006) sin pings periódicos
-      _wsPingTimer = setInterval(() => {
-        if (_ws && _ws.readyState === WebSocket.OPEN) {
-          _ws.send('');
-        }
-      }, 20000);
+      console.log('[AISStream] conectado via Worker proxy');
     };
 
     _ws.onmessage = (event) => {
-      // Detectar mensajes de error del servidor antes de parsear
       if (typeof event.data === 'string' && event.data.includes('"error"')) {
         console.error('[AISStream] error del servidor:', event.data);
         return;
@@ -292,10 +274,9 @@ const App = (() => {
 
     _ws.onclose = (ev) => {
       console.warn('[AISStream] desconectado código:', ev.code, '| razón:', ev.reason || '(sin razón)');
-      if (_wsPingTimer) { clearInterval(_wsPingTimer); _wsPingTimer = null; }
       setApiStatus(false);
       _wsReconnectTimer = setTimeout(() => {
-        toast('Reconectando a AISStream…', 'warning');
+        toast('Reconectando…', 'warning');
         connectAISStream();
       }, 5000);
     };

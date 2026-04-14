@@ -3,9 +3,8 @@
 // ============================================================
 
 const CONFIG = {
-  // ---------- AISStream.io — WebSocket real-time, gratis ----------
-  AISSTREAM_API_KEY: '80e4d5513c36e34d2ed75ae3f0a5a2b0cafc31f3',
-  AISSTREAM_WS_URL:  'wss://stream.aisstream.io/v0/stream',
+  // ---------- WebSocket via Cloudflare Worker (proxy oculta API key y evita bloqueo de Origin) ----------
+  WORKER_WS_URL: 'wss://fishproxy.jsosa86.workers.dev',
 
   // ---------- Mapa ----------
   MAP_CENTER: [41.4, 2.2],   // Costa Catalana (Barcelona)
