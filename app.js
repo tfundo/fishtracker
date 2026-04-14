@@ -273,13 +273,12 @@ const App = (() => {
       console.log('[AISStream] suscrito, zona:', s.toFixed(2), w.toFixed(2), '→', n.toFixed(2), e.toFixed(2));
     };
 
-    _ws.onmessage = (event) => {
-      if (typeof event.data === 'string' && event.data.includes('"error"')) {
-        console.error('[AISStream] error del servidor:', event.data);
-        return;
-      }
-      try { ingestAISMessage(JSON.parse(event.data)); }
-      catch (err) { console.warn('[AISStream] parse error', err); }
+    _ws.onmessage = async (event) => {
+      try {
+        const text = event.data instanceof Blob ? await event.data.text() : event.data;
+        if (text.includes('"error"')) { console.error('[AISStream] error del servidor:', text); return; }
+        ingestAISMessage(JSON.parse(text));
+      } catch (err) { console.warn('[AISStream] parse error', err); }
     };
 
     _ws.onclose = (ev) => {
