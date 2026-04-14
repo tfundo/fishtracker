@@ -163,6 +163,7 @@ const App = (() => {
   // ──────────────────────────────────────────────
   let _ws               = null;
   let _wsReconnectTimer = null;
+  let _wsPingTimer      = null;
 
   // Mapa MID (3 primeros dígitos MMSI) → bandera
   const MID_TO_FLAG = {
@@ -237,7 +238,8 @@ const App = (() => {
     // Cancelar reconexión pendiente si la hay
     if (_wsReconnectTimer) { clearTimeout(_wsReconnectTimer); _wsReconnectTimer = null; }
 
-    // Cerrar conexión anterior limpiamente
+    // Cancelar keepalive y cerrar conexión anterior limpiamente
+    if (_wsPingTimer) { clearInterval(_wsPingTimer); _wsPingTimer = null; }
     if (_ws) {
       _ws.onclose = null;
       _ws.close();
@@ -264,20 +266,33 @@ const App = (() => {
           'StaticDataReport',             // Nombre/tipo Class B
         ],
       };
+      console.log('[AISStream] enviando suscripción:', JSON.stringify(subscription));
       _ws.send(JSON.stringify(subscription));
       setApiStatus(true);
       showLoadingBar(100);
       setTimeout(() => showLoadingBar(0), 400);
-      console.log('[AISStream] conectado, zona:', s.toFixed(2), w.toFixed(2), '→', n.toFixed(2), e.toFixed(2));
+
+      // Keepalive cada 20s — el servidor cierra la conexión (1006) sin pings periódicos
+      _wsPingTimer = setInterval(() => {
+        if (_ws && _ws.readyState === WebSocket.OPEN) {
+          _ws.send('');
+        }
+      }, 20000);
     };
 
     _ws.onmessage = (event) => {
+      // Detectar mensajes de error del servidor antes de parsear
+      if (typeof event.data === 'string' && event.data.includes('"error"')) {
+        console.error('[AISStream] error del servidor:', event.data);
+        return;
+      }
       try { ingestAISMessage(JSON.parse(event.data)); }
       catch (err) { console.warn('[AISStream] parse error', err); }
     };
 
     _ws.onclose = (ev) => {
-      console.warn('[AISStream] desconectado', ev.code);
+      console.warn('[AISStream] desconectado código:', ev.code, '| razón:', ev.reason || '(sin razón)');
+      if (_wsPingTimer) { clearInterval(_wsPingTimer); _wsPingTimer = null; }
       setApiStatus(false);
       _wsReconnectTimer = setTimeout(() => {
         toast('Reconectando a AISStream…', 'warning');
@@ -285,7 +300,9 @@ const App = (() => {
       }, 5000);
     };
 
-    _ws.onerror = () => { /* onclose se dispara después */ };
+    _ws.onerror = (ev) => {
+      console.error('[AISStream] WebSocket error:', ev);
+    };
   }
 
   function ingestAISMessage(msg) {
