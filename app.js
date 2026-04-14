@@ -177,46 +177,71 @@ const App = (() => {
   }
 
   async function pollVesselAPI() {
-    const b      = state.map.getBounds();
-    const center = state.map.getCenter();
-    // Radio aproximado en millas náuticas según zoom
-    const zoom   = state.map.getZoom();
-    const radius = Math.min(500, Math.max(10, Math.round(800 / Math.pow(2, zoom - 4))));
+    const b    = state.map.getBounds();
+    const zoom = state.map.getZoom();
 
-    // Intentamos dos endpoints comunes de VesselAPI
-    const endpoints = [
-      `/v1/ais/vessels?latitude=${center.lat.toFixed(4)}&longitude=${center.lng.toFixed(4)}&radius=${radius}`,
-      `/v1/vessels?min_lat=${b.getSouth().toFixed(4)}&max_lat=${b.getNorth().toFixed(4)}&min_lon=${b.getWest().toFixed(4)}&max_lon=${b.getEast().toFixed(4)}`,
-    ];
+    // Endpoint principal: bounding box del área visible (con 30% de padding)
+    const latPad = (b.getNorth() - b.getSouth()) * 0.3;
+    const lonPad = (b.getEast()  - b.getWest())  * 0.3;
+    const params = new URLSearchParams({
+      'filter.latBottom': (b.getSouth() - latPad).toFixed(4),
+      'filter.latTop':    (b.getNorth() + latPad).toFixed(4),
+      'filter.lonLeft':   (b.getWest()  - lonPad).toFixed(4),
+      'filter.lonRight':  (b.getEast()  + lonPad).toFixed(4),
+      'pagination.limit': '50',
+    });
 
-    for (const endpoint of endpoints) {
-      try {
-        const res  = await fetch(CONFIG.PROXY_URL + endpoint);
-        if (!res.ok) { console.warn('[VesselAPI] HTTP', res.status, endpoint); continue; }
-        const json = await res.json();
-        const list = extractVesselList(json);
-        if (list === null) { console.warn('[VesselAPI] Formato desconocido:', json); continue; }
-        console.log(`[VesselAPI] ${list.length} barcos recibidos vía ${endpoint}`);
-        list.forEach(v => ingestVesselAPIVessel(v));
-        setApiStatus(true);
-        scheduleUIUpdate();
-        return;                               // éxito — no probar siguiente endpoint
-      } catch (e) {
-        console.warn('[VesselAPI] Error en', endpoint, e.message);
+    const url = `${CONFIG.PROXY_URL}/v1/location/vessels/bounding-box?${params}`;
+
+    try {
+      showLoadingBar(30);
+      const res  = await fetch(url);
+      showLoadingBar(70);
+
+      if (!res.ok) {
+        const txt = await res.text();
+        console.warn('[VesselAPI] HTTP', res.status, txt);
+        toast(`VesselAPI: error ${res.status}`, 'warning');
+        return;
       }
-    }
 
-    // Si ningún endpoint funcionó, AISStream sigue activo como fallback
-    console.warn('[VesselAPI] Ningún endpoint respondió correctamente');
+      const json = await res.json();
+      const list = extractVesselList(json);
+
+      if (list === null) {
+        console.warn('[VesselAPI] Formato de respuesta desconocido:', JSON.stringify(json).slice(0, 200));
+        return;
+      }
+
+      console.log(`[VesselAPI] ✅ ${list.length} barcos recibidos`);
+      list.forEach(v => ingestVesselAPIVessel(v));
+      setApiStatus(true);
+      scheduleUIUpdate();
+
+      if (list.length > 0) toast(`VesselAPI: ${list.length} barcos cargados`, 'success');
+
+    } catch (e) {
+      console.warn('[VesselAPI] Error de red:', e.message);
+    } finally {
+      showLoadingBar(0);
+    }
+  }
+
+  function showLoadingBar(pct) {
+    const bar = document.getElementById('loadingBar');
+    if (bar) bar.style.width = pct + '%';
+    if (pct === 0) setTimeout(() => { if (bar) bar.style.width = '0%'; }, 400);
   }
 
   // Extrae el array de barcos independientemente del envoltorio del JSON
   function extractVesselList(json) {
-    if (Array.isArray(json))            return json;
-    if (Array.isArray(json?.data))      return json.data;
-    if (Array.isArray(json?.vessels))   return json.vessels;
-    if (Array.isArray(json?.results))   return json.results;
-    if (Array.isArray(json?.ais))       return json.ais;
+    if (Array.isArray(json))                    return json;
+    if (Array.isArray(json?.data))              return json.data;
+    if (Array.isArray(json?.vessels))           return json.vessels;
+    if (Array.isArray(json?.results))           return json.results;
+    if (Array.isArray(json?.ais))               return json.ais;
+    if (Array.isArray(json?.items))             return json.items;
+    if (json?.data?.vessels && Array.isArray(json.data.vessels)) return json.data.vessels;
     return null;
   }
 
