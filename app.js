@@ -192,19 +192,17 @@ const App = (() => {
       toast('WebSocket conectado — esperando datos AIS…', 'info');
     };
 
-    state.ws.onmessage = (evt) => {
+    state.ws.onmessage = async (evt) => {
       _msgCount++;
       updateMsgCounter(_msgCount);
 
-      // Loguear los primeros 3 mensajes para diagnóstico
-      if (_msgCount <= 3) {
-        console.log(`[AIS] Mensaje #${_msgCount}:`, evt.data.slice(0, 300));
-      }
-      // Toasts de confirmación en hitos clave
-      if (_msgCount === 1)  toast('✅ Primer mensaje AIS recibido', 'success');
-      if (_msgCount === 100) toast(`📡 ${_msgCount} mensajes AIS procesados`, 'info');
+      // AISStream envía Blobs binarios — convertir a texto primero
+      const text = evt.data instanceof Blob ? await evt.data.text() : evt.data;
 
-      try { handleAISMessage(JSON.parse(evt.data)); } catch (e) {
+      if (_msgCount <= 2) console.log(`[AIS] Mensaje #${_msgCount}:`, text.slice(0, 200));
+      if (_msgCount === 1)   toast('✅ Datos AIS recibidos — cargando barcos…', 'success');
+
+      try { handleAISMessage(JSON.parse(text)); } catch (e) {
         if (_msgCount <= 3) console.warn('[AIS] Error parse:', e);
       }
     };
@@ -238,15 +236,6 @@ const App = (() => {
     el.textContent = `📡 ${n} msgs`;
   }
 
-  // Tipos AIS no pesqueros: al recibir ShipStaticData, se eliminan del mapa
-  const NON_FISHING = new Set([
-    60,61,62,63,64,65,66,67,68,69,
-    70,71,72,73,74,75,76,77,78,79,
-    80,81,82,83,84,85,86,87,88,89,
-    31,32,33,34,35,36,37,
-    50,51,52,53,54,55,56,57,58,59,
-  ]);
-
   function handleAISMessage(msg) {
     const meta = msg.MetaData || {};
     const mmsi = String(meta.MMSI || '');
@@ -268,7 +257,6 @@ const App = (() => {
         existing.lastSeen = new Date().toLocaleTimeString('es-ES');
         existing.lastTs   = now;
       } else {
-        // Añadir inmediatamente; los no pesqueros se filtran con ShipStaticData
         state.vesselMap.set(mmsi, {
           id: mmsi, mmsi,
           name:     meta.ShipName?.trim() || `MMSI ${mmsi}`,
@@ -281,21 +269,21 @@ const App = (() => {
           lastSeen: new Date().toLocaleTimeString('es-ES'),
           lastTs:   now,
         });
-        if (state.vesselMap.size > 3000) {
+        // Cap a 5000 barcos
+        if (state.vesselMap.size > 5000) {
           const oldest = [...state.vesselMap.entries()].sort((a,b) => a[1].lastTs - b[1].lastTs)[0];
           if (oldest) state.vesselMap.delete(oldest[0]);
         }
       }
 
     } else if (msg.MessageType === 'ShipStaticData') {
+      // Solo enriquecer datos; no borrar nada
       const ship = msg.Message?.ShipStaticData || {};
-      const type = ship.Type ?? 0;
-      if (NON_FISHING.has(type)) { state.vesselMap.delete(mmsi); return; }
       const v = state.vesselMap.get(mmsi);
       if (v) {
-        v.name = ship.Name?.trim() || v.name;
-        v.imo  = ship.Imo ? `IMO${ship.Imo}` : v.imo;
-        v.gear = detectGearFromName(v.name) || 'trawlers';
+        if (ship.Name?.trim()) v.name = ship.Name.trim();
+        if (ship.Imo)          v.imo  = `IMO${ship.Imo}`;
+        v.gear   = detectGearFromName(v.name) || 'trawlers';
         v.lastTs = now;
       }
     }
