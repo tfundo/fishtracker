@@ -251,16 +251,26 @@ const App = (() => {
     showLoadingBar(20);
     setApiStatus(false);
 
-    // Conectar al Worker proxy — el Worker gestiona la suscripción, API key y keepalive
-    const wsUrl = `${CONFIG.WORKER_WS_URL}/aisstream?s=${s.toFixed(4)}&w=${w.toFixed(4)}&n=${n.toFixed(4)}&e=${e.toFixed(4)}`;
-    console.log('[AISStream] conectando via Worker:', wsUrl);
-    _ws = new WebSocket(wsUrl);
+    // Conexión directa a AISStream.io desde el browser
+    console.log('[AISStream] conectando directamente a AISStream.io…');
+    _ws = new WebSocket(CONFIG.AISSTREAM_WS_URL);
 
     _ws.onopen = () => {
+      // Enviar suscripción con la API key y el bounding box
+      _ws.send(JSON.stringify({
+        APIKey: CONFIG.AISSTREAM_API_KEY,
+        BoundingBoxes: [[[s, w], [n, e]]],
+        FilterMessageTypes: [
+          'PositionReport',
+          'StandardClassBPositionReport',
+          'ShipStaticData',
+          'StaticDataReport',
+        ],
+      }));
       setApiStatus(true);
       showLoadingBar(100);
       setTimeout(() => showLoadingBar(0), 400);
-      console.log('[AISStream] conectado via Worker proxy');
+      console.log('[AISStream] suscrito, zona:', s.toFixed(2), w.toFixed(2), '→', n.toFixed(2), e.toFixed(2));
     };
 
     _ws.onmessage = (event) => {
