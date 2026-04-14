@@ -7,7 +7,7 @@ const CONFIG = {
   // ---------- Cloudflare Worker Proxy → VesselAPI ----------
   // El Worker añade cabeceras CORS para que GitHub Pages pueda llamarlo
   PROXY_URL:        'https://fishproxy.jsosa86.workers.dev',
-  POLL_INTERVAL_MS: 15000,   // refresco cada 15 segundos
+  POLL_INTERVAL_MS: 60000,   // refresco cada 60 segundos (conservar cuota)
 
   // ---------- Mapa ----------
   MAP_CENTER: [20, 0],

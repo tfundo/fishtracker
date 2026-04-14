@@ -29,7 +29,6 @@ const App = (() => {
   };
 
   const mmsiTypeCache = new Map();  // mmsi → { shipType, flag, rawType }
-  const enrichQueue   = new Set();  // MMSIs pendientes de enriquecer tipo
 
   // ──────────────────────────────────────────────
   //  Init
@@ -214,7 +213,6 @@ const App = (() => {
       if (total > 0) {
         setApiStatus(true);
         scheduleUIUpdate();
-        enrichVessels();
       }
 
     } catch (err) {
@@ -259,7 +257,7 @@ const App = (() => {
         lastSeen:  new Date().toLocaleTimeString('es-ES'),
         lastTs:    sigTs,
       });
-      if (!cached) enrichQueue.add(mmsi);
+      // sin enriquecimiento — clasificación solo por nombre
     }
   }
 
