@@ -17,8 +17,6 @@ const App = (() => {
     heatLayer:        null,
     portLayer:        null,
     vesselMap:        new Map(),   // mmsi → vessel object (fuente de verdad)
-    pendingPos:       new Map(),   // mmsi → última posición antes de confirmar tipo AIS
-    fishingMmsi:      new Set(),   // mmsi confirmados como tipo 30 (pesquero)
     vessels:          [],          // array derivado de vesselMap tras filtros
     filteredVessels:  [],
     selectedVessel:   null,
@@ -214,13 +212,13 @@ const App = (() => {
     };
   }
 
-  // Tipos AIS que definitivamente NO son pesqueros (se descartan)
+  // Tipos AIS confirmados como NO pesqueros → eliminar del mapa al recibirlos
   const NON_FISHING_TYPES = new Set([
-    60,61,62,63,64,65,66,67,68,69,       // Pasajeros
-    70,71,72,73,74,75,76,77,78,79,       // Carga
-    80,81,82,83,84,85,86,87,88,89,       // Tanqueros
-    31,32,33,34,35,36,37,               // Remolque, militar, vela, recreo
-    50,51,52,53,54,55,56,57,58,59,      // Servicios especiales
+    60,61,62,63,64,65,66,67,68,69,   // Pasajeros
+    70,71,72,73,74,75,76,77,78,79,   // Carga
+    80,81,82,83,84,85,86,87,88,89,   // Tanqueros
+    31,32,33,34,35,36,37,            // Remolque, militar, vela, recreo
+    50,51,52,53,54,55,56,57,58,59,   // Servicios especiales
   ]);
 
   function handleAISMessage(msg) {
@@ -230,99 +228,76 @@ const App = (() => {
 
     const now = Date.now();
 
-    // ── PositionReport ──────────────────────────
+    // ── PositionReport ─────────────────────────────────────────────────────
     if (msg.MessageType === 'PositionReport') {
       const pos = msg.Message?.PositionReport || {};
       const lat = pos.Latitude;
       const lon = pos.Longitude;
-      if (lat == null || lon == null || Math.abs(lat) > 90 || Math.abs(lon) > 180) return;
+
+      // Descartar coordenadas inválidas o nulas (0,0 es el Mar de Guinea, válido)
+      if (lat == null || lon == null) return;
+      if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return;
 
       const status   = mapNavStatus(pos.NavigationalStatus ?? -1);
-      const posData  = {
-        lat, lon,
-        speed:    (pos.Sog ?? 0).toFixed(1),
-        course:   Math.round(pos.Cog ?? 0),
-        status,
-        name:     meta.ShipName?.trim() || `MMSI ${mmsi}`,
-        lastSeen: new Date().toLocaleTimeString('es-ES'),
-        lastTs:   now,
-      };
-
       const existing = state.vesselMap.get(mmsi);
 
       if (existing) {
-        // Actualizar posición de barco ya confirmado como pesquero
-        Object.assign(existing, posData);
-      } else if (state.fishingMmsi.has(mmsi)) {
-        // Pesquero confirmado por ShipStaticData anterior — añadir ahora
-        state.vesselMap.set(mmsi, buildVesselObj(mmsi, posData));
-        state.pendingPos.delete(mmsi);
+        // Actualizar barco ya en el mapa
+        existing.lat      = lat;
+        existing.lon      = lon;
+        existing.speed    = (pos.Sog ?? existing.speed).toFixed(1);
+        existing.course   = Math.round(pos.Cog ?? existing.course);
+        existing.status   = status;
+        existing.lastSeen = new Date().toLocaleTimeString('es-ES');
+        existing.lastTs   = now;
       } else {
-        // Tipo desconocido — guardar posición hasta recibir ShipStaticData
-        state.pendingPos.set(mmsi, posData);
-        // Cap: si hay demasiados pendientes, limpiar los más antiguos
-        if (state.pendingPos.size > 5000) {
-          const oldest = [...state.pendingPos.entries()]
-            .sort((a, b) => a[1].lastTs - b[1].lastTs)
-            .slice(0, 1000);
-          oldest.forEach(([k]) => state.pendingPos.delete(k));
+        // Añadir todos los barcos inmediatamente.
+        // Los no pesqueros se eliminarán cuando llegue su ShipStaticData.
+        state.vesselMap.set(mmsi, {
+          id:       mmsi,
+          mmsi,
+          name:     meta.ShipName?.trim() || `MMSI ${mmsi}`,
+          imo:      '—',
+          flag:     '??',
+          gear:     detectGearFromName(meta.ShipName || ''),
+          status,
+          lat, lon,
+          speed:    (pos.Sog ?? 0).toFixed(1),
+          course:   Math.round(pos.Cog ?? 0),
+          lastSeen: new Date().toLocaleTimeString('es-ES'),
+          lastTs:   now,
+        });
+
+        // Cap: máx 3000 barcos en pantalla — eliminar los más antiguos
+        if (state.vesselMap.size > 3000) {
+          const oldest = [...state.vesselMap.entries()]
+            .sort((a, b) => a[1].lastTs - b[1].lastTs)[0];
+          if (oldest) state.vesselMap.delete(oldest[0]);
         }
       }
 
-    // ── ShipStaticData ───────────────────────────
+    // ── ShipStaticData ──────────────────────────────────────────────────────
     } else if (msg.MessageType === 'ShipStaticData') {
       const ship = msg.Message?.ShipStaticData || {};
       const type = ship.Type ?? 0;
 
-      // Descartar si es tipo conocido NO pesquero
       if (NON_FISHING_TYPES.has(type)) {
+        // Confirmado como NO pesquero → eliminar del mapa
         state.vesselMap.delete(mmsi);
-        state.pendingPos.delete(mmsi);
         return;
       }
 
-      // Tipo 30 (pesquero) o tipo 0/desconocido → incluir
-      state.fishingMmsi.add(mmsi);
-
+      // Tipo 30 (pesquero) o tipo desconocido (0) → enriquecer datos
       const existing = state.vesselMap.get(mmsi);
-      const pending  = state.pendingPos.get(mmsi);
-
-      const staticData = {
-        name: ship.Name?.trim() || (existing?.name) || (pending?.name) || `MMSI ${mmsi}`,
-        imo:  ship.Imo ? `IMO${ship.Imo}` : (existing?.imo || '—'),
-        gear: detectGearFromName(ship.Name || '') || 'trawlers',
-        lastTs: now,
-      };
-
       if (existing) {
-        Object.assign(existing, staticData);
-      } else if (pending) {
-        // Tenemos posición pendiente → montar el barco completo
-        state.vesselMap.set(mmsi, buildVesselObj(mmsi, { ...pending, ...staticData }));
-        state.pendingPos.delete(mmsi);
+        existing.name   = ship.Name?.trim() || existing.name;
+        existing.imo    = ship.Imo ? `IMO${ship.Imo}` : existing.imo;
+        existing.gear   = detectGearFromName(existing.name) || 'trawlers';
+        existing.lastTs = now;
       }
-      // Si no hay posición aún, esperar al próximo PositionReport
     }
 
     scheduleUIUpdate();
-  }
-
-  function buildVesselObj(mmsi, d) {
-    return {
-      id:       mmsi,
-      mmsi,
-      name:     d.name     || `MMSI ${mmsi}`,
-      imo:      d.imo      || '—',
-      flag:     '??',
-      gear:     d.gear     || detectGearFromName(d.name || '') || 'trawlers',
-      status:   d.status   || 'transit',
-      lat:      d.lat      || 0,
-      lon:      d.lon      || 0,
-      speed:    d.speed    || '0',
-      course:   d.course   || 0,
-      lastSeen: d.lastSeen || new Date().toLocaleTimeString('es-ES'),
-      lastTs:   d.lastTs   || Date.now(),
-    };
   }
 
   // Detecta arte de pesca por el nombre del barco
@@ -704,8 +679,6 @@ const App = (() => {
 
     document.getElementById('refreshBtn').addEventListener('click', () => {
       state.vesselMap.clear();
-      state.pendingPos.clear();
-      state.fishingMmsi.clear();
       connectAISStream();
     });
 
