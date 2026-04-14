@@ -419,7 +419,6 @@ const App = (() => {
   // Al mover/zoom: reconectar WebSocket con los nuevos límites del mapa
   function setupMapBoundsRefresh() {
     const refresh = debounce(() => {
-      state.vesselMap.clear();
       connectAISStream();
     }, 1000);
     state.map.on('moveend', refresh);
