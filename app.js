@@ -181,18 +181,27 @@ const App = (() => {
   ]);
 
   // Devuelve el bounding box del mapa actual en formato AISStream
-  function getMapBBox() {
+  // padding = fracción extra alrededor del área visible (0.5 = 50% más)
+  function getMapBBox(padding = 0.5) {
     const b = state.map.getBounds();
-    return [[[b.getSouth(), b.getWest()], [b.getNorth(), b.getEast()]]];
+    const latPad = (b.getNorth() - b.getSouth()) * padding;
+    const lonPad = (b.getEast()  - b.getWest())  * padding;
+    return [[[
+      Math.max(-90,  b.getSouth() - latPad),
+      Math.max(-180, b.getWest()  - lonPad),
+    ], [
+      Math.min(90,  b.getNorth() + latPad),
+      Math.min(180, b.getEast()  + lonPad),
+    ]]];
   }
 
   // Reconecta con los nuevos límites del mapa al mover/zoom
+  // NO limpiamos vesselMap: los barcos ya recibidos permanecen visibles
   function setupMapBoundsRefresh() {
     const reconnect = debounce(() => {
-      state.vesselMap.clear();
       nonFishingMmsi.clear();
       connectAISStream();
-    }, 1500);
+    }, 2000);
     state.map.on('moveend', reconnect);
     state.map.on('zoomend', reconnect);
   }
@@ -273,7 +282,8 @@ const App = (() => {
     const now = Date.now();
 
     if (msg.MessageType === 'PositionReport') {
-      // (filtro de tipo desactivado temporalmente para diagnóstico)
+      // Ignorar MMSIs confirmados como NO pesqueros vía ShipStaticData
+      if (nonFishingMmsi.has(mmsi)) return;
 
       const pos = msg.Message?.PositionReport || {};
       const lat = pos.Latitude, lon = pos.Longitude;
@@ -291,10 +301,12 @@ const App = (() => {
       } else {
         state.vesselMap.set(mmsi, {
           id: mmsi, mmsi,
-          name:     meta.ShipName?.trim() || `MMSI ${mmsi}`,
-          imo: '—', flag: '??',
-          gear:     detectGearFromName(meta.ShipName || ''),
-          status:   mapNavStatus(pos.NavigationalStatus ?? -1),
+          name:      meta.ShipName?.trim() || `MMSI ${mmsi}`,
+          imo: '—',  flag: meta.ShipName ? '??' : '??',
+          gear:      detectGearFromName(meta.ShipName || ''),
+          isFishing: null,   // null = aún sin confirmar por ShipStaticData
+          aisType:   null,
+          status:    mapNavStatus(pos.NavigationalStatus ?? -1),
           lat, lon,
           speed:    (pos.Sog ?? 0).toFixed(1),
           course:   Math.round(pos.Cog ?? 0),
@@ -310,15 +322,39 @@ const App = (() => {
     } else if (msg.MessageType === 'ShipStaticData') {
       const ship = msg.Message?.ShipStaticData || {};
       const type = ship.Type ?? 0;
-      const v    = state.vesselMap.get(mmsi);
+
+      // Si el tipo está confirmado como NO pesquero, marcarlo y eliminarlo del mapa
+      if (NON_FISHING_TYPES.has(type)) {
+        nonFishingMmsi.add(mmsi);
+        state.vesselMap.delete(mmsi);
+        scheduleUIUpdate();
+        return;
+      }
+
+      const v = state.vesselMap.get(mmsi);
       if (v) {
         if (ship.Name?.trim()) v.name = ship.Name.trim();
         if (ship.Imo)          v.imo  = `IMO${ship.Imo}`;
-        // Marcar visualmente si es pesquero confirmado (tipo 30)
-        v.isFishing = (type === 30);
+        v.isFishing = (type === 30); // tipo 30 = pesquero confirmado
         v.aisType   = type;
         v.gear      = detectGearFromName(v.name) || 'trawlers';
         v.lastTs    = now;
+      } else if (!nonFishingMmsi.has(mmsi) && !NON_FISHING_TYPES.has(type)) {
+        // ShipStaticData llegó antes que PositionReport: pre-registrar
+        state.vesselMap.set(mmsi, {
+          id: mmsi, mmsi,
+          name:      ship.Name?.trim() || `MMSI ${mmsi}`,
+          imo:       ship.Imo ? `IMO${ship.Imo}` : '—',
+          flag:      '??',
+          gear:      detectGearFromName(ship.Name || '') || 'trawlers',
+          isFishing: (type === 30),
+          aisType:   type,
+          status:    'transit',
+          lat:       null, lon: null,
+          speed:     '0.0', course: 0,
+          lastSeen:  new Date().toLocaleTimeString('es-ES'),
+          lastTs:    now,
+        });
       }
     }
 
@@ -363,9 +399,22 @@ const App = (() => {
   //  Aplicar filtros y renderizar
   // ──────────────────────────────────────────────
   function applyFilters() {
-    // Derivar array desde el mapa vivo
-    state.vessels = Array.from(state.vesselMap.values());
+    // Solo barcos con posición conocida
+    state.vessels = Array.from(state.vesselMap.values()).filter(v => v.lat != null);
+
+    // Filtro de tipo de arte activo
     state.filteredVessels = state.vessels.filter(v => state.activeGears.has(v.gear));
+
+    // Barcos confirmados como pesqueros (tipo 30) siempre visibles aunque no coincida el arte
+    const confirmed = state.vessels.filter(v => v.isFishing === true && !state.activeGears.has(v.gear));
+    const merged = [...state.filteredVessels, ...confirmed];
+
+    // Ordenar: pesqueros confirmados primero, luego por última señal
+    merged.sort((a, b) => {
+      if (a.isFishing && !b.isFishing) return -1;
+      if (!a.isFishing && b.isFishing)  return  1;
+      return b.lastTs - a.lastTs;
+    });
 
     // Actualizar contadores por tipo de arte
     Object.keys(CONFIG.GEAR_TYPES).forEach(key => {
@@ -373,10 +422,10 @@ const App = (() => {
       if (el) el.textContent = state.vessels.filter(v => v.gear === key).length;
     });
 
-    renderVesselList(state.filteredVessels);
-    renderVesselMarkers(state.filteredVessels);
-    renderHeatmap(state.filteredVessels);
-    updateStats(state.filteredVessels);
+    renderVesselList(merged);
+    renderVesselMarkers(merged);
+    renderHeatmap(merged);
+    updateStats(merged);
   }
 
   // ──────────────────────────────────────────────
@@ -391,9 +440,14 @@ const App = (() => {
       const gear  = CONFIG.GEAR_TYPES[vessel.gear];
       const color = gear?.color || '#888';
 
+      // Pesqueros confirmados (AIS tipo 30): borde más grueso y badge 🐟
+      const isCfm   = vessel.isFishing === true;
+      const badge   = isCfm ? '<span style="position:absolute;top:-6px;right:-6px;font-size:10px;">🐟</span>' : '';
+      const border  = isCfm ? `border:2px solid ${color};box-shadow:0 0 6px ${color};` : `border:1px solid ${color};`;
+
       const icon = L.divIcon({
         className: '',
-        html: `<div class="vessel-marker-icon" style="background:${color}22;border-color:${color};">${gear?.icon || '🚢'}</div>`,
+        html: `<div class="vessel-marker-icon" style="position:relative;background:${color}22;${border}">${gear?.icon || '🚢'}${badge}</div>`,
         iconSize:   [32, 32],
         iconAnchor: [16, 16],
         popupAnchor:[0, -18],
@@ -474,12 +528,15 @@ const App = (() => {
   }
 
   function buildVesselCardHTML(v) {
-    const gear = CONFIG.GEAR_TYPES[v.gear];
+    const gear        = CONFIG.GEAR_TYPES[v.gear];
+    const fishBadge   = v.isFishing === true
+      ? '<span style="font-size:10px;background:#27ae6022;color:#27ae60;border:1px solid #27ae60;border-radius:4px;padding:0 4px;margin-left:4px;">🐟 Pesquero</span>'
+      : '';
     return `
       <div class="vessel-card ${state.selectedVessel?.id === v.id ? 'selected' : ''}" data-id="${v.id}">
         <div class="vessel-card-header">
           <span class="vessel-gear-icon">${gear?.icon || '🚢'}</span>
-          <span class="vessel-name">${v.name}</span>
+          <span class="vessel-name">${v.name}${fishBadge}</span>
           <span class="vessel-status-badge ${v.status}">${getStatusLabel(v.status)}</span>
         </div>
         <div class="vessel-card-meta">
@@ -704,8 +761,10 @@ const App = (() => {
   //  Stats
   // ──────────────────────────────────────────────
   function updateStats(vessels) {
-    document.getElementById('statTotal').textContent    = vessels.length;
-    document.getElementById('statFishing').textContent  = vessels.filter(v => v.status === 'fishing').length;
+    document.getElementById('statTotal').textContent     = vessels.length;
+    // "Pescando" = AIS tipo 30 confirmado O estado de navegación 7 (activamente pescando)
+    const fishingCount = vessels.filter(v => v.isFishing === true || v.status === 'fishing').length;
+    document.getElementById('statFishing').textContent   = fishingCount;
     document.getElementById('statCountries').textContent = new Set(vessels.map(v => v.flag)).size;
   }
 
