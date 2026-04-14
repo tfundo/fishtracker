@@ -179,22 +179,23 @@ const App = (() => {
   async function pollVesselAPI() {
     const b = state.map.getBounds();
 
-    // VesselAPI limita el bbox a 4 grados de span total (|dLat|+|dLon| <= 4)
-    // Si el área visible es mayor, usamos un bbox centrado de 1.8x1.8 grados
+    // Usar exactamente el área visible del mapa (sin padding extra)
+    // VesselAPI limita a 4 grados de span total — si el mapa está muy alejado
+    // usamos un bbox centrado de 2x2 grados
     let latBottom = b.getSouth();
     let latTop    = b.getNorth();
     let lonLeft   = b.getWest();
     let lonRight  = b.getEast();
 
-    const dLat = latTop - latBottom;
+    const dLat = latTop  - latBottom;
     const dLon = lonRight - lonLeft;
 
     if (dLat + dLon > 3.8) {
       const center = state.map.getCenter();
-      latBottom = center.lat - 0.9;
-      latTop    = center.lat + 0.9;
-      lonLeft   = center.lng - 0.9;
-      lonRight  = center.lng + 0.9;
+      latBottom = center.lat - 1.0;
+      latTop    = center.lat + 1.0;
+      lonLeft   = center.lng - 1.0;
+      lonRight  = center.lng + 1.0;
     }
 
     let total = 0;
@@ -203,8 +204,8 @@ const App = (() => {
     showLoadingBar(20);
 
     try {
-      // Hasta 3 páginas de resultados (50 barcos/página = 150 barcos máx)
-      for (let page = 0; page < 3; page++) {
+      // Hasta 2 páginas de resultados (50 barcos/página = 100 barcos máx)
+      for (let page = 0; page < 2; page++) {
         const params = new URLSearchParams({
           'filter.latBottom': latBottom.toFixed(4),
           'filter.latTop':    latTop.toFixed(4),
@@ -402,15 +403,15 @@ const App = (() => {
     ]]];
   }
 
-  // Reconecta con los nuevos límites del mapa al mover/zoom
-  // NO limpiamos vesselMap: los barcos ya recibidos permanecen visibles
+  // Al mover/hacer zoom: limpiar barcos fuera del área y cargar la nueva zona
   function setupMapBoundsRefresh() {
-    const reconnect = debounce(() => {
+    const refresh = debounce(() => {
+      state.vesselMap.clear();   // limpiar para mostrar solo barcos del área actual
       nonFishingMmsi.clear();
-      connectAISStream();
-    }, 2000);
-    state.map.on('moveend', reconnect);
-    state.map.on('zoomend', reconnect);
+      pollVesselAPI();           // carga inmediata de la nueva zona
+    }, 800);
+    state.map.on('moveend', refresh);
+    state.map.on('zoomend', refresh);
   }
 
   function connectAISStream() {
