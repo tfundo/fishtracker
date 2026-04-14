@@ -17,6 +17,8 @@ const App = (() => {
     heatLayer:        null,
     portLayer:        null,
     vesselMap:        new Map(),   // mmsi → vessel object (fuente de verdad)
+    pendingPos:       new Map(),   // mmsi → última posición antes de confirmar tipo AIS
+    fishingMmsi:      new Set(),   // mmsi confirmados como tipo 30 (pesquero)
     vessels:          [],          // array derivado de vesselMap tras filtros
     filteredVessels:  [],
     selectedVessel:   null,
@@ -212,6 +214,15 @@ const App = (() => {
     };
   }
 
+  // Tipos AIS que definitivamente NO son pesqueros (se descartan)
+  const NON_FISHING_TYPES = new Set([
+    60,61,62,63,64,65,66,67,68,69,       // Pasajeros
+    70,71,72,73,74,75,76,77,78,79,       // Carga
+    80,81,82,83,84,85,86,87,88,89,       // Tanqueros
+    31,32,33,34,35,36,37,               // Remolque, militar, vela, recreo
+    50,51,52,53,54,55,56,57,58,59,      // Servicios especiales
+  ]);
+
   function handleAISMessage(msg) {
     const meta = msg.MetaData || {};
     const mmsi = String(meta.MMSI || '');
@@ -227,61 +238,91 @@ const App = (() => {
       if (lat == null || lon == null || Math.abs(lat) > 90 || Math.abs(lon) > 180) return;
 
       const status   = mapNavStatus(pos.NavigationalStatus ?? -1);
+      const posData  = {
+        lat, lon,
+        speed:    (pos.Sog ?? 0).toFixed(1),
+        course:   Math.round(pos.Cog ?? 0),
+        status,
+        name:     meta.ShipName?.trim() || `MMSI ${mmsi}`,
+        lastSeen: new Date().toLocaleTimeString('es-ES'),
+        lastTs:   now,
+      };
+
       const existing = state.vesselMap.get(mmsi);
 
-      // Sólo añadir barcos nuevos si están pescando en este momento
-      if (!existing && status !== 'fishing') return;
-
       if (existing) {
-        existing.lat      = lat;
-        existing.lon      = lon;
-        existing.speed    = (pos.Sog ?? existing.speed).toFixed(1);
-        existing.course   = Math.round(pos.Cog ?? existing.course);
-        existing.status   = status;
-        existing.lastSeen = new Date().toLocaleTimeString('es-ES');
-        existing.lastTs   = now;
+        // Actualizar posición de barco ya confirmado como pesquero
+        Object.assign(existing, posData);
+      } else if (state.fishingMmsi.has(mmsi)) {
+        // Pesquero confirmado por ShipStaticData anterior — añadir ahora
+        state.vesselMap.set(mmsi, buildVesselObj(mmsi, posData));
+        state.pendingPos.delete(mmsi);
       } else {
-        state.vesselMap.set(mmsi, {
-          id:       mmsi,
-          name:     meta.ShipName?.trim() || `MMSI ${mmsi}`,
-          mmsi,
-          imo:      '—',
-          flag:     '??',
-          gear:     detectGearFromName(meta.ShipName || ''),
-          status,
-          lat, lon,
-          speed:    (pos.Sog ?? 0).toFixed(1),
-          course:   Math.round(pos.Cog ?? 0),
-          lastSeen: new Date().toLocaleTimeString('es-ES'),
-          lastTs:   now,
-        });
+        // Tipo desconocido — guardar posición hasta recibir ShipStaticData
+        state.pendingPos.set(mmsi, posData);
+        // Cap: si hay demasiados pendientes, limpiar los más antiguos
+        if (state.pendingPos.size > 5000) {
+          const oldest = [...state.pendingPos.entries()]
+            .sort((a, b) => a[1].lastTs - b[1].lastTs)
+            .slice(0, 1000);
+          oldest.forEach(([k]) => state.pendingPos.delete(k));
+        }
       }
 
     // ── ShipStaticData ───────────────────────────
     } else if (msg.MessageType === 'ShipStaticData') {
       const ship = msg.Message?.ShipStaticData || {};
-      const type = ship.Type ?? -1;
-      const isFishingVessel = (type === 30);
+      const type = ship.Type ?? 0;
+
+      // Descartar si es tipo conocido NO pesquero
+      if (NON_FISHING_TYPES.has(type)) {
+        state.vesselMap.delete(mmsi);
+        state.pendingPos.delete(mmsi);
+        return;
+      }
+
+      // Tipo 30 (pesquero) o tipo 0/desconocido → incluir
+      state.fishingMmsi.add(mmsi);
+
       const existing = state.vesselMap.get(mmsi);
+      const pending  = state.pendingPos.get(mmsi);
 
-      // Sólo incorporar barcos nuevos si su tipo AIS es "pesquero" (30)
-      if (!existing && !isFishingVessel) return;
-
-      const v = existing || {
-        id: mmsi, mmsi, lat: 0, lon: 0,
-        speed: '0', course: 0, status: 'transit',
-        lastSeen: '—', lastTs: now, flag: '??',
+      const staticData = {
+        name: ship.Name?.trim() || (existing?.name) || (pending?.name) || `MMSI ${mmsi}`,
+        imo:  ship.Imo ? `IMO${ship.Imo}` : (existing?.imo || '—'),
+        gear: detectGearFromName(ship.Name || '') || 'trawlers',
+        lastTs: now,
       };
 
-      v.name  = ship.Name?.trim() || v.name || `MMSI ${mmsi}`;
-      v.imo   = ship.Imo ? `IMO${ship.Imo}` : v.imo;
-      v.gear  = detectGearFromName(v.name) || detectGearFromType(type) || v.gear || 'trawlers';
-      v.lastTs = now;
-
-      if (!existing) state.vesselMap.set(mmsi, v);
+      if (existing) {
+        Object.assign(existing, staticData);
+      } else if (pending) {
+        // Tenemos posición pendiente → montar el barco completo
+        state.vesselMap.set(mmsi, buildVesselObj(mmsi, { ...pending, ...staticData }));
+        state.pendingPos.delete(mmsi);
+      }
+      // Si no hay posición aún, esperar al próximo PositionReport
     }
 
     scheduleUIUpdate();
+  }
+
+  function buildVesselObj(mmsi, d) {
+    return {
+      id:       mmsi,
+      mmsi,
+      name:     d.name     || `MMSI ${mmsi}`,
+      imo:      d.imo      || '—',
+      flag:     '??',
+      gear:     d.gear     || detectGearFromName(d.name || '') || 'trawlers',
+      status:   d.status   || 'transit',
+      lat:      d.lat      || 0,
+      lon:      d.lon      || 0,
+      speed:    d.speed    || '0',
+      course:   d.course   || 0,
+      lastSeen: d.lastSeen || new Date().toLocaleTimeString('es-ES'),
+      lastTs:   d.lastTs   || Date.now(),
+    };
   }
 
   // Detecta arte de pesca por el nombre del barco
@@ -663,6 +704,8 @@ const App = (() => {
 
     document.getElementById('refreshBtn').addEventListener('click', () => {
       state.vesselMap.clear();
+      state.pendingPos.clear();
+      state.fishingMmsi.clear();
       connectAISStream();
     });
 
