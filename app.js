@@ -167,36 +167,75 @@ const App = (() => {
   //  AISStream — WebSocket tiempo real (sin CORS)
   // ──────────────────────────────────────────────
 
+  let _msgCount = 0; // contador global de mensajes recibidos
+
   function connectAISStream() {
     clearTimeout(state.wsReconnectTimer);
     if (state.ws) { state.ws.onclose = null; state.ws.close(); state.ws = null; }
 
     showLoader('Conectando a AISStream…');
+    _msgCount = 0;
+    updateMsgCounter(0);
 
     state.ws = new WebSocket(CONFIG.AISSTREAM_WS);
 
     state.ws.onopen = () => {
-      state.ws.send(JSON.stringify({
+      const sub = {
         APIKey:             CONFIG.AISSTREAM_TOKEN,
         BoundingBoxes:      [[[-90, -180], [90, 180]]],
         FilterMessageTypes: ['PositionReport', 'ShipStaticData'],
-      }));
+      };
+      console.log('[AIS] WebSocket abierto, enviando suscripción:', sub);
+      state.ws.send(JSON.stringify(sub));
       setApiStatus(true);
       hideLoader();
-      toast('Conectado — recibiendo barcos en tiempo real', 'success');
+      toast('WebSocket conectado — esperando datos AIS…', 'info');
     };
 
     state.ws.onmessage = (evt) => {
-      try { handleAISMessage(JSON.parse(evt.data)); } catch (_) {}
+      _msgCount++;
+      updateMsgCounter(_msgCount);
+
+      // Loguear los primeros 3 mensajes para diagnóstico
+      if (_msgCount <= 3) {
+        console.log(`[AIS] Mensaje #${_msgCount}:`, evt.data.slice(0, 300));
+      }
+      // Toasts de confirmación en hitos clave
+      if (_msgCount === 1)  toast('✅ Primer mensaje AIS recibido', 'success');
+      if (_msgCount === 100) toast(`📡 ${_msgCount} mensajes AIS procesados`, 'info');
+
+      try { handleAISMessage(JSON.parse(evt.data)); } catch (e) {
+        if (_msgCount <= 3) console.warn('[AIS] Error parse:', e);
+      }
     };
 
-    state.ws.onerror = () => { setApiStatus(false); hideLoader(); };
-
-    state.ws.onclose = () => {
+    state.ws.onerror = (e) => {
+      console.error('[AIS] WebSocket error:', e);
       setApiStatus(false);
-      toast('Conexión perdida. Reconectando en 5 s…', 'warning');
+      hideLoader();
+      toast('Error WebSocket — ver consola (F12)', 'error');
+    };
+
+    state.ws.onclose = (e) => {
+      console.warn('[AIS] WebSocket cerrado:', e.code, e.reason);
+      setApiStatus(false);
+      toast(`Conexión cerrada (${e.code}). Reconectando en 5 s…`, 'warning');
       state.wsReconnectTimer = setTimeout(connectAISStream, 5000);
     };
+  }
+
+  function updateMsgCounter(n) {
+    let el = document.getElementById('msgCounter');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'msgCounter';
+      el.title = 'Mensajes AIS recibidos';
+      el.style.cssText = 'font-size:11px;color:var(--text-muted);padding:0 8px;white-space:nowrap;';
+      // Insertar antes del status-dot en la topbar
+      const dot = document.getElementById('apiStatus');
+      if (dot) dot.parentNode.insertBefore(el, dot);
+    }
+    el.textContent = `📡 ${n} msgs`;
   }
 
   // Tipos AIS no pesqueros: al recibir ShipStaticData, se eliminan del mapa
