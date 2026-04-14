@@ -177,48 +177,70 @@ const App = (() => {
   }
 
   async function pollVesselAPI() {
-    const b    = state.map.getBounds();
-    const zoom = state.map.getZoom();
+    const b = state.map.getBounds();
 
-    // Endpoint principal: bounding box del área visible (con 30% de padding)
-    const latPad = (b.getNorth() - b.getSouth()) * 0.3;
-    const lonPad = (b.getEast()  - b.getWest())  * 0.3;
-    const params = new URLSearchParams({
-      'filter.latBottom': (b.getSouth() - latPad).toFixed(4),
-      'filter.latTop':    (b.getNorth() + latPad).toFixed(4),
-      'filter.lonLeft':   (b.getWest()  - lonPad).toFixed(4),
-      'filter.lonRight':  (b.getEast()  + lonPad).toFixed(4),
-      'pagination.limit': '50',
-    });
+    // VesselAPI limita el bbox a 4 grados de span total (|dLat|+|dLon| <= 4)
+    // Si el área visible es mayor, usamos un bbox centrado de 1.8x1.8 grados
+    let latBottom = b.getSouth();
+    let latTop    = b.getNorth();
+    let lonLeft   = b.getWest();
+    let lonRight  = b.getEast();
 
-    const url = `${CONFIG.PROXY_URL}/v1/location/vessels/bounding-box?${params}`;
+    const dLat = latTop - latBottom;
+    const dLon = lonRight - lonLeft;
+
+    if (dLat + dLon > 3.8) {
+      const center = state.map.getCenter();
+      latBottom = center.lat - 0.9;
+      latTop    = center.lat + 0.9;
+      lonLeft   = center.lng - 0.9;
+      lonRight  = center.lng + 0.9;
+    }
+
+    let total = 0;
+    let nextToken = null;
+
+    showLoadingBar(20);
 
     try {
-      showLoadingBar(30);
-      const res  = await fetch(url);
-      showLoadingBar(70);
+      // Hasta 3 páginas de resultados (50 barcos/página = 150 barcos máx)
+      for (let page = 0; page < 3; page++) {
+        const params = new URLSearchParams({
+          'filter.latBottom': latBottom.toFixed(4),
+          'filter.latTop':    latTop.toFixed(4),
+          'filter.lonLeft':   lonLeft.toFixed(4),
+          'filter.lonRight':  lonRight.toFixed(4),
+          'pagination.limit': '50',
+        });
+        if (nextToken) params.set('pagination.nextToken', nextToken);
 
-      if (!res.ok) {
-        const txt = await res.text();
-        console.warn('[VesselAPI] HTTP', res.status, txt);
-        toast(`VesselAPI: error ${res.status}`, 'warning');
-        return;
+        const res = await fetch(`${CONFIG.PROXY_URL}/v1/location/vessels/bounding-box?${params}`);
+        showLoadingBar(40 + page * 20);
+
+        if (!res.ok) {
+          const txt = await res.text();
+          console.warn('[VesselAPI] HTTP', res.status, txt);
+          toast(`VesselAPI error ${res.status}`, 'warning');
+          break;
+        }
+
+        const json = await res.json();
+        const list = extractVesselList(json);
+        if (!list) { console.warn('[VesselAPI] Formato desconocido:', JSON.stringify(json).slice(0,150)); break; }
+
+        list.forEach(v => ingestVesselAPIVessel(v));
+        total += list.length;
+        nextToken = json.nextToken || null;
+
+        if (!nextToken || list.length < 50) break;   // no hay más páginas
       }
 
-      const json = await res.json();
-      const list = extractVesselList(json);
-
-      if (list === null) {
-        console.warn('[VesselAPI] Formato de respuesta desconocido:', JSON.stringify(json).slice(0, 200));
-        return;
+      if (total > 0) {
+        console.log(`[VesselAPI] ✅ ${total} barcos recibidos`);
+        setApiStatus(true);
+        scheduleUIUpdate();
+        toast(`${total} barcos cargados`, 'success');
       }
-
-      console.log(`[VesselAPI] ✅ ${list.length} barcos recibidos`);
-      list.forEach(v => ingestVesselAPIVessel(v));
-      setApiStatus(true);
-      scheduleUIUpdate();
-
-      if (list.length > 0) toast(`VesselAPI: ${list.length} barcos cargados`, 'success');
 
     } catch (e) {
       console.warn('[VesselAPI] Error de red:', e.message);
@@ -229,8 +251,9 @@ const App = (() => {
 
   function showLoadingBar(pct) {
     const bar = document.getElementById('loadingBar');
-    if (bar) bar.style.width = pct + '%';
-    if (pct === 0) setTimeout(() => { if (bar) bar.style.width = '0%'; }, 400);
+    if (!bar) return;
+    bar.style.width = pct + '%';
+    if (pct === 0) setTimeout(() => { bar.style.width = '0%'; }, 500);
   }
 
   // Extrae el array de barcos independientemente del envoltorio del JSON
@@ -246,49 +269,48 @@ const App = (() => {
   }
 
   // Normaliza un objeto de VesselAPI al formato interno
+  // Campos reales: mmsi, vessel_name, latitude, longitude, sog, cog, heading, nav_status, imo
   function ingestVesselAPIVessel(raw) {
-    const mmsi = String(raw.mmsi || raw.MMSI || raw.vessel_id || '');
+    const mmsi = String(raw.mmsi || '');
     if (!mmsi) return;
 
-    const lat = parseFloat(raw.lat ?? raw.latitude  ?? raw.Latitude  ?? NaN);
-    const lon = parseFloat(raw.lon ?? raw.longitude ?? raw.Longitude ?? NaN);
+    const lat = parseFloat(raw.latitude  ?? NaN);
+    const lon = parseFloat(raw.longitude ?? NaN);
     if (isNaN(lat) || isNaN(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return;
+    if (raw.suspected_glitch) return;   // descartar posiciones erróneas
 
-    const type     = raw.vessel_type ?? raw.type ?? raw.ship_type ?? raw.Type ?? 0;
-    const navStat  = raw.nav_status  ?? raw.navigational_status   ?? raw.NavigationalStatus ?? -1;
-    const name     = (raw.name || raw.vessel_name || raw.Name || `MMSI ${mmsi}`).trim();
-    const speed    = parseFloat(raw.speed ?? raw.sog ?? raw.SOG ?? 0).toFixed(1);
-    const course   = Math.round(parseFloat(raw.course ?? raw.cog ?? raw.COG ?? 0));
-    const now      = Date.now();
-
-    // Filtrar no-pesqueros confirmados
-    if (NON_FISHING_TYPES.has(Number(type))) {
-      nonFishingMmsi.add(mmsi);
-      state.vesselMap.delete(mmsi);
-      return;
-    }
+    const navStat = raw.nav_status ?? -1;
+    const name    = (raw.vessel_name || `MMSI ${mmsi}`).trim();
+    const speed   = parseFloat(raw.sog ?? 0).toFixed(1);
+    const course  = Math.round(parseFloat(raw.cog ?? raw.heading ?? 0));
+    const now     = Date.now();
 
     const existing = state.vesselMap.get(mmsi);
     if (existing) {
-      existing.lat = lat; existing.lon = lon;
-      existing.speed = speed; existing.course = course;
-      existing.status  = mapNavStatus(navStat);
+      // Solo actualizar si la señal es más reciente
+      const sigTs = raw.timestamp ? new Date(raw.timestamp).getTime() : now;
+      if (sigTs < existing.lastTs) return;
+
+      existing.lat      = lat;
+      existing.lon      = lon;
+      existing.speed    = speed;
+      existing.course   = course;
+      existing.status   = mapNavStatus(navStat);
       existing.lastSeen = new Date().toLocaleTimeString('es-ES');
-      existing.lastTs   = now;
+      existing.lastTs   = sigTs;
       if (name && !name.startsWith('MMSI')) existing.name = name;
-      if (type) { existing.aisType = type; existing.isFishing = (Number(type) === 30); }
     } else {
       state.vesselMap.set(mmsi, {
         id: mmsi, mmsi, name,
         imo:       raw.imo ? `IMO${raw.imo}` : '—',
-        flag:      raw.flag ?? raw.country ?? raw.callsign?.slice(0,2) ?? '??',
+        flag:      '??',
         gear:      detectGearFromName(name),
-        isFishing: (Number(type) === 30),
-        aisType:   type,
+        isFishing: null,   // VesselAPI no devuelve tipo en este endpoint
+        aisType:   null,
         status:    mapNavStatus(navStat),
         lat, lon, speed, course,
         lastSeen:  new Date().toLocaleTimeString('es-ES'),
-        lastTs:    now,
+        lastTs:    raw.timestamp ? new Date(raw.timestamp).getTime() : now,
         source:    'vesselapi',
       });
     }
