@@ -9,10 +9,6 @@ const CONFIG = {
   PROXY_URL:        'https://fishproxy.jsosa86.workers.dev',
   POLL_INTERVAL_MS: 15000,   // refresco cada 15 segundos
 
-  // ---------- AISStream WebSocket (fallback global) ----------
-  AISSTREAM_TOKEN: '80e4d5513c36e34d2ed75ae3f0a5a2b0cafc31f3',
-  AISSTREAM_WS:    'wss://stream.aisstream.io/v0/stream',
-
   // ---------- Mapa ----------
   MAP_CENTER: [20, 0],
   MAP_ZOOM: 3,
