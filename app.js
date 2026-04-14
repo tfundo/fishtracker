@@ -44,7 +44,8 @@ const App = (() => {
     setupSearch();
     setupButtons();
     setupMapBoundsRefresh();
-    connectAISStream();
+    startVesselAPIPolling();   // fuente principal: VesselAPI vía proxy
+    connectAISStream();        // complemento: AISStream (cobertura global)
     startPruneTimer();
   }
 
@@ -162,6 +163,110 @@ const App = (() => {
     });
 
     document.getElementById('statPorts').textContent = CONFIG.DEMO_PORTS.length;
+  }
+
+  // ──────────────────────────────────────────────
+  //  VesselAPI — polling via Cloudflare Worker proxy
+  // ──────────────────────────────────────────────
+
+  let _pollTimer = null;
+
+  function startVesselAPIPolling() {
+    pollVesselAPI();                          // primera carga inmediata
+    _pollTimer = setInterval(pollVesselAPI, CONFIG.POLL_INTERVAL_MS);
+  }
+
+  async function pollVesselAPI() {
+    const b      = state.map.getBounds();
+    const center = state.map.getCenter();
+    // Radio aproximado en millas náuticas según zoom
+    const zoom   = state.map.getZoom();
+    const radius = Math.min(500, Math.max(10, Math.round(800 / Math.pow(2, zoom - 4))));
+
+    // Intentamos dos endpoints comunes de VesselAPI
+    const endpoints = [
+      `/v1/ais/vessels?latitude=${center.lat.toFixed(4)}&longitude=${center.lng.toFixed(4)}&radius=${radius}`,
+      `/v1/vessels?min_lat=${b.getSouth().toFixed(4)}&max_lat=${b.getNorth().toFixed(4)}&min_lon=${b.getWest().toFixed(4)}&max_lon=${b.getEast().toFixed(4)}`,
+    ];
+
+    for (const endpoint of endpoints) {
+      try {
+        const res  = await fetch(CONFIG.PROXY_URL + endpoint);
+        if (!res.ok) { console.warn('[VesselAPI] HTTP', res.status, endpoint); continue; }
+        const json = await res.json();
+        const list = extractVesselList(json);
+        if (list === null) { console.warn('[VesselAPI] Formato desconocido:', json); continue; }
+        console.log(`[VesselAPI] ${list.length} barcos recibidos vía ${endpoint}`);
+        list.forEach(v => ingestVesselAPIVessel(v));
+        setApiStatus(true);
+        scheduleUIUpdate();
+        return;                               // éxito — no probar siguiente endpoint
+      } catch (e) {
+        console.warn('[VesselAPI] Error en', endpoint, e.message);
+      }
+    }
+
+    // Si ningún endpoint funcionó, AISStream sigue activo como fallback
+    console.warn('[VesselAPI] Ningún endpoint respondió correctamente');
+  }
+
+  // Extrae el array de barcos independientemente del envoltorio del JSON
+  function extractVesselList(json) {
+    if (Array.isArray(json))            return json;
+    if (Array.isArray(json?.data))      return json.data;
+    if (Array.isArray(json?.vessels))   return json.vessels;
+    if (Array.isArray(json?.results))   return json.results;
+    if (Array.isArray(json?.ais))       return json.ais;
+    return null;
+  }
+
+  // Normaliza un objeto de VesselAPI al formato interno
+  function ingestVesselAPIVessel(raw) {
+    const mmsi = String(raw.mmsi || raw.MMSI || raw.vessel_id || '');
+    if (!mmsi) return;
+
+    const lat = parseFloat(raw.lat ?? raw.latitude  ?? raw.Latitude  ?? NaN);
+    const lon = parseFloat(raw.lon ?? raw.longitude ?? raw.Longitude ?? NaN);
+    if (isNaN(lat) || isNaN(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return;
+
+    const type     = raw.vessel_type ?? raw.type ?? raw.ship_type ?? raw.Type ?? 0;
+    const navStat  = raw.nav_status  ?? raw.navigational_status   ?? raw.NavigationalStatus ?? -1;
+    const name     = (raw.name || raw.vessel_name || raw.Name || `MMSI ${mmsi}`).trim();
+    const speed    = parseFloat(raw.speed ?? raw.sog ?? raw.SOG ?? 0).toFixed(1);
+    const course   = Math.round(parseFloat(raw.course ?? raw.cog ?? raw.COG ?? 0));
+    const now      = Date.now();
+
+    // Filtrar no-pesqueros confirmados
+    if (NON_FISHING_TYPES.has(Number(type))) {
+      nonFishingMmsi.add(mmsi);
+      state.vesselMap.delete(mmsi);
+      return;
+    }
+
+    const existing = state.vesselMap.get(mmsi);
+    if (existing) {
+      existing.lat = lat; existing.lon = lon;
+      existing.speed = speed; existing.course = course;
+      existing.status  = mapNavStatus(navStat);
+      existing.lastSeen = new Date().toLocaleTimeString('es-ES');
+      existing.lastTs   = now;
+      if (name && !name.startsWith('MMSI')) existing.name = name;
+      if (type) { existing.aisType = type; existing.isFishing = (Number(type) === 30); }
+    } else {
+      state.vesselMap.set(mmsi, {
+        id: mmsi, mmsi, name,
+        imo:       raw.imo ? `IMO${raw.imo}` : '—',
+        flag:      raw.flag ?? raw.country ?? raw.callsign?.slice(0,2) ?? '??',
+        gear:      detectGearFromName(name),
+        isFishing: (Number(type) === 30),
+        aisType:   type,
+        status:    mapNavStatus(navStat),
+        lat, lon, speed, course,
+        lastSeen:  new Date().toLocaleTimeString('es-ES'),
+        lastTs:    now,
+        source:    'vesselapi',
+      });
+    }
   }
 
   // ──────────────────────────────────────────────

@@ -4,8 +4,12 @@
 // ============================================================
 
 const CONFIG = {
-  // ---------- AISStream WebSocket (tiempo real, sin CORS) ----------
-  // https://aisstream.io — WebSocket no está sujeto a restricciones CORS
+  // ---------- Cloudflare Worker Proxy → VesselAPI ----------
+  // El Worker añade cabeceras CORS para que GitHub Pages pueda llamarlo
+  PROXY_URL:        'https://fishtracker-proxy.jsosa86.workers.dev',
+  POLL_INTERVAL_MS: 30000,   // refresco cada 30 segundos
+
+  // ---------- AISStream WebSocket (fallback global) ----------
   AISSTREAM_TOKEN: '80e4d5513c36e34d2ed75ae3f0a5a2b0cafc31f3',
   AISSTREAM_WS:    'wss://stream.aisstream.io/v0/stream',
 
