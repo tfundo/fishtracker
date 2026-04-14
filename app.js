@@ -273,8 +273,7 @@ const App = (() => {
     const now = Date.now();
 
     if (msg.MessageType === 'PositionReport') {
-      // Ignorar si ya confirmamos que NO es pesquero
-      if (nonFishingMmsi.has(mmsi)) return;
+      // (filtro de tipo desactivado temporalmente para diagnóstico)
 
       const pos = msg.Message?.PositionReport || {};
       const lat = pos.Latitude, lon = pos.Longitude;
@@ -311,21 +310,15 @@ const App = (() => {
     } else if (msg.MessageType === 'ShipStaticData') {
       const ship = msg.Message?.ShipStaticData || {};
       const type = ship.Type ?? 0;
-
-      if (NON_FISHING_TYPES.has(type)) {
-        // Confirmar como no pesquero: añadir a lista negra y eliminar del mapa
-        nonFishingMmsi.add(mmsi);
-        state.vesselMap.delete(mmsi);
-        return;
-      }
-
-      // Tipo 30 (pesquero) o desconocido → enriquecer datos
-      const v = state.vesselMap.get(mmsi);
+      const v    = state.vesselMap.get(mmsi);
       if (v) {
         if (ship.Name?.trim()) v.name = ship.Name.trim();
         if (ship.Imo)          v.imo  = `IMO${ship.Imo}`;
-        v.gear   = detectGearFromName(v.name) || 'trawlers';
-        v.lastTs = now;
+        // Marcar visualmente si es pesquero confirmado (tipo 30)
+        v.isFishing = (type === 30);
+        v.aisType   = type;
+        v.gear      = detectGearFromName(v.name) || 'trawlers';
+        v.lastTs    = now;
       }
     }
 
