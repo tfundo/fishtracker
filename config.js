@@ -4,7 +4,7 @@
 
 const CONFIG = {
   // ---------- WebSocket via Cloudflare Worker (proxy oculta API key y evita bloqueo de Origin) ----------
-  WORKER_WS_URL: 'wss://fishproxy.jsosa86.workers.dev',
+  WORKER_WS_URL: 'wss://fishtracker-proxy.jsosa86.workers.dev',
 
   // ---------- Mapa ----------
   MAP_CENTER: [41.4, 2.2],   // Costa Catalana (Barcelona)
