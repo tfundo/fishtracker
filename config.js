@@ -1,17 +1,15 @@
 // ============================================================
 //  FishTracker — Configuración
-//  Obtén tu token gratuito en: https://globalfishingwatch.org/our-apis/
 // ============================================================
 
 const CONFIG = {
-  // ---------- Cloudflare Worker Proxy → VesselAPI ----------
-  // El Worker añade cabeceras CORS para que GitHub Pages pueda llamarlo
-  PROXY_URL:        'https://fishproxy.jsosa86.workers.dev',
-  POLL_INTERVAL_MS: 60000,   // refresco cada 60 segundos (conservar cuota)
+  // ---------- AISStream.io — WebSocket real-time, gratis ----------
+  AISSTREAM_API_KEY: '80e4d5513c36e34d2ed75ae3f0a5a2b0cafc31f3',
+  AISSTREAM_WS_URL:  'wss://stream.aisstream.io/v0/stream',
 
   // ---------- Mapa ----------
-  MAP_CENTER: [20, 0],
-  MAP_ZOOM: 3,
+  MAP_CENTER: [41.4, 2.2],   // Costa Catalana (Barcelona)
+  MAP_ZOOM: 9,
   MAP_MIN_ZOOM: 2,
   MAP_MAX_ZOOM: 18,
 
@@ -42,17 +40,20 @@ const CONFIG = {
     year:    { label: '1 año',   inactiveMs: 0               },
   },
 
-  // ---------- Puertos principales (demo sin API) ----------
+  // ---------- Puertos principales ----------
   DEMO_PORTS: [
-    { name: 'Vigo',         country: 'España',    lat: 42.2406, lon: -8.7207 },
-    { name: 'Bergen',       country: 'Noruega',   lat: 60.3913, lon:  5.3221 },
-    { name: 'Tokyo',        country: 'Japón',     lat: 35.6895, lon: 139.6917 },
-    { name: 'Busan',        country: 'Corea',     lat: 35.1796, lon: 129.0756 },
-    { name: 'Gloucester',   country: 'EE.UU.',    lat: 42.6159, lon: -70.6620 },
-    { name: 'Mar del Plata',country: 'Argentina', lat: -38.0055,lon: -57.5426 },
-    { name: 'Dakar',        country: 'Senegal',   lat: 14.6937, lon: -17.4441 },
-    { name: 'Mumbai',       country: 'India',     lat: 18.9388, lon: 72.8354  },
-    { name: 'Nuuk',         country: 'Groenlandia',lat:64.1814, lon: -51.6941 },
-    { name: 'Reykjavik',    country: 'Islandia',  lat: 64.1355, lon: -21.8954 },
+    // Costa Catalana
+    { name: 'Barcelona',              country: 'España',  lat: 41.3496, lon:  2.1777 },
+    { name: 'Tarragona',              country: 'España',  lat: 41.0935, lon:  1.2628 },
+    { name: 'Palamós',                country: 'España',  lat: 41.8486, lon:  3.1313 },
+    { name: 'Roses',                  country: 'España',  lat: 42.2638, lon:  3.1791 },
+    { name: 'Blanes',                 country: 'España',  lat: 41.6728, lon:  2.7970 },
+    { name: 'Vilanova i la Geltrú',   country: 'España',  lat: 41.2194, lon:  1.7250 },
+    { name: "Sant Carles de la Ràpita", country: 'España', lat: 40.6094, lon: 0.5897 },
+    // Resto Mediterráneo
+    { name: 'Valencia',  country: 'España',  lat: 39.4561, lon:  0.3208 },
+    { name: 'Marseille', country: 'Francia', lat: 43.2965, lon:  5.3698 },
+    { name: 'Génova',    country: 'Italia',  lat: 44.4056, lon:  8.9463 },
+    { name: 'Vigo',      country: 'España',  lat: 42.2406, lon: -8.7207 },
   ],
 };

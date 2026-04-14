@@ -1,58 +1,33 @@
 /**
- * FishTracker — Cloudflare Worker Proxy
- * Reenvía peticiones a VesselAPI añadiendo cabeceras CORS.
+ * FishTracker — Cloudflare Worker
+ * Reservado para futuros endpoints (ej. Global Fishing Watch Events API).
+ * Los datos AIS van ahora directo desde el frontend via WebSocket a AISStream.io.
  */
-
-const VESSEL_API_KEY  = '4f8c8bcb8bfc7ffc5f74e129206eb6a4d0e05cb9dc27748ab13a8819ded31fcb';
-const VESSEL_API_BASE = 'https://api.vesselapi.com';
 
 const CORS = {
   'Access-Control-Allow-Origin':  '*',
   'Access-Control-Allow-Methods': 'GET, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, API-Key',
+  'Access-Control-Allow-Headers': 'Content-Type',
 };
 
 export default {
   async fetch(request) {
-
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: CORS });
     }
 
-    const incoming = new URL(request.url);
-    const target   = VESSEL_API_BASE + incoming.pathname + incoming.search;
+    const url = new URL(request.url);
 
-    // Log para depuración (visible en Cloudflare → Workers → Logs)
-    console.log('[proxy] →', target);
-
-    let res;
-    try {
-      res = await fetch(target, {
-        headers: {
-          // VesselAPI acepta la key de varias formas — probamos la más común
-          'Authorization': `Bearer ${VESSEL_API_KEY}`,
-          'API-Key':       VESSEL_API_KEY,
-          'X-API-Key':     VESSEL_API_KEY,
-          'Accept':        'application/json',
-        },
-      });
-    } catch (err) {
+    if (url.pathname === '/status') {
       return new Response(
-        JSON.stringify({ proxy_error: err.message, target }),
-        { status: 502, headers: { ...CORS, 'Content-Type': 'application/json' } }
+        JSON.stringify({ status: 'ok', note: 'AIS data via AISStream.io WebSocket (frontend direct)' }),
+        { status: 200, headers: { ...CORS, 'Content-Type': 'application/json' } }
       );
     }
 
-    const body = await res.text();
-    console.log('[proxy] ←', res.status, body.slice(0, 200));
-
-    return new Response(body, {
-      status: res.status,
-      headers: {
-        ...CORS,
-        'Content-Type': res.headers.get('Content-Type') || 'application/json',
-        'X-Proxy-Status': String(res.status),
-      },
-    });
+    return new Response(
+      JSON.stringify({ error: 'Not found' }),
+      { status: 404, headers: { ...CORS, 'Content-Type': 'application/json' } }
+    );
   },
 };
