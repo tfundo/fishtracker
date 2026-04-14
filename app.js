@@ -46,6 +46,7 @@ const App = (() => {
     setupMapBoundsRefresh();
     startVesselAPIPolling();   // única fuente: VesselAPI vía Cloudflare proxy
     startPruneTimer();
+    hideLoader();              // ocultar loader inicial (ya no usamos AISStream)
   }
 
   // ──────────────────────────────────────────────
