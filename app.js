@@ -43,6 +43,7 @@ const App = (() => {
     addPortMarkers();
     setupSearch();
     setupButtons();
+    setupMapBoundsRefresh();
     connectAISStream();
     startPruneTimer();
   }
@@ -179,6 +180,23 @@ const App = (() => {
     50,51,52,53,54,55,56,57,58,59,   // Servicios especiales
   ]);
 
+  // Devuelve el bounding box del mapa actual en formato AISStream
+  function getMapBBox() {
+    const b = state.map.getBounds();
+    return [[[b.getSouth(), b.getWest()], [b.getNorth(), b.getEast()]]];
+  }
+
+  // Reconecta con los nuevos límites del mapa al mover/zoom
+  function setupMapBoundsRefresh() {
+    const reconnect = debounce(() => {
+      state.vesselMap.clear();
+      nonFishingMmsi.clear();
+      connectAISStream();
+    }, 1500);
+    state.map.on('moveend', reconnect);
+    state.map.on('zoomend', reconnect);
+  }
+
   function connectAISStream() {
     clearTimeout(state.wsReconnectTimer);
     if (state.ws) { state.ws.onclose = null; state.ws.close(); state.ws = null; }
@@ -191,16 +209,17 @@ const App = (() => {
     state.ws = new WebSocket(CONFIG.AISSTREAM_WS);
 
     state.ws.onopen = () => {
-      const sub = {
+      const bbox = getMapBBox();
+      const sub  = {
         APIKey:             CONFIG.AISSTREAM_TOKEN,
-        BoundingBoxes:      [[[-90, -180], [90, 180]]],
+        BoundingBoxes:      bbox,
         FilterMessageTypes: ['PositionReport', 'ShipStaticData'],
       };
-      console.log('[AIS] WebSocket abierto, enviando suscripción:', sub);
+      console.log('[AIS] Suscripción bbox:', bbox);
       state.ws.send(JSON.stringify(sub));
       setApiStatus(true);
       hideLoader();
-      toast('WebSocket conectado — esperando datos AIS…', 'info');
+      toast('Conectado — cargando barcos del área visible…', 'info');
     };
 
     state.ws.onmessage = async (evt) => {
@@ -679,6 +698,7 @@ const App = (() => {
 
     document.getElementById('refreshBtn').addEventListener('click', () => {
       state.vesselMap.clear();
+      nonFishingMmsi.clear();
       connectAISStream();
     });
 
