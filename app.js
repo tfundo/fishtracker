@@ -167,7 +167,17 @@ const App = (() => {
   //  AISStream — WebSocket tiempo real (sin CORS)
   // ──────────────────────────────────────────────
 
-  let _msgCount = 0; // contador global de mensajes recibidos
+  let _msgCount = 0;
+  const nonFishingMmsi = new Set(); // MMSIs confirmados como NO pesqueros
+
+  // Tipos AIS definitivamente no pesqueros
+  const NON_FISHING_TYPES = new Set([
+    60,61,62,63,64,65,66,67,68,69,   // Pasajeros
+    70,71,72,73,74,75,76,77,78,79,   // Carga
+    80,81,82,83,84,85,86,87,88,89,   // Tanqueros
+    31,32,33,34,35,36,37,            // Remolque, militar, vela, recreo
+    50,51,52,53,54,55,56,57,58,59,   // Servicios especiales
+  ]);
 
   function connectAISStream() {
     clearTimeout(state.wsReconnectTimer);
@@ -176,6 +186,7 @@ const App = (() => {
     showLoader('Conectando a AISStream…');
     _msgCount = 0;
     updateMsgCounter(0);
+    nonFishingMmsi.clear();
 
     state.ws = new WebSocket(CONFIG.AISSTREAM_WS);
 
@@ -243,6 +254,9 @@ const App = (() => {
     const now = Date.now();
 
     if (msg.MessageType === 'PositionReport') {
+      // Ignorar si ya confirmamos que NO es pesquero
+      if (nonFishingMmsi.has(mmsi)) return;
+
       const pos = msg.Message?.PositionReport || {};
       const lat = pos.Latitude, lon = pos.Longitude;
       if (lat == null || lon == null || Math.abs(lat) > 90 || Math.abs(lon) > 180) return;
@@ -269,7 +283,6 @@ const App = (() => {
           lastSeen: new Date().toLocaleTimeString('es-ES'),
           lastTs:   now,
         });
-        // Cap a 5000 barcos
         if (state.vesselMap.size > 5000) {
           const oldest = [...state.vesselMap.entries()].sort((a,b) => a[1].lastTs - b[1].lastTs)[0];
           if (oldest) state.vesselMap.delete(oldest[0]);
@@ -277,8 +290,17 @@ const App = (() => {
       }
 
     } else if (msg.MessageType === 'ShipStaticData') {
-      // Solo enriquecer datos; no borrar nada
       const ship = msg.Message?.ShipStaticData || {};
+      const type = ship.Type ?? 0;
+
+      if (NON_FISHING_TYPES.has(type)) {
+        // Confirmar como no pesquero: añadir a lista negra y eliminar del mapa
+        nonFishingMmsi.add(mmsi);
+        state.vesselMap.delete(mmsi);
+        return;
+      }
+
+      // Tipo 30 (pesquero) o desconocido → enriquecer datos
       const v = state.vesselMap.get(mmsi);
       if (v) {
         if (ship.Name?.trim()) v.name = ship.Name.trim();
