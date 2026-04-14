@@ -44,8 +44,7 @@ const App = (() => {
     setupSearch();
     setupButtons();
     setupMapBoundsRefresh();
-    startVesselAPIPolling();   // fuente principal: VesselAPI vía proxy
-    connectAISStream();        // complemento: AISStream (cobertura global)
+    startVesselAPIPolling();   // única fuente: VesselAPI vía Cloudflare proxy
     startPruneTimer();
   }
 
@@ -240,6 +239,7 @@ const App = (() => {
         setApiStatus(true);
         scheduleUIUpdate();
         toast(`${total} barcos cargados`, 'success');
+        enrichVessels();   // enriquecer con tipo y bandera en segundo plano
       }
 
     } catch (e) {
@@ -285,12 +285,14 @@ const App = (() => {
     const course  = Math.round(parseFloat(raw.cog ?? raw.heading ?? 0));
     const now     = Date.now();
 
+    const sigTs    = raw.timestamp ? new Date(raw.timestamp).getTime() : now;
+    const cached   = mmsiTypeCache.get(mmsi);
+    const shipType = cached?.shipType || detectGearFromName(name);
+    const flag     = cached?.flag     || '??';
+
     const existing = state.vesselMap.get(mmsi);
     if (existing) {
-      // Solo actualizar si la señal es más reciente
-      const sigTs = raw.timestamp ? new Date(raw.timestamp).getTime() : now;
-      if (sigTs < existing.lastTs) return;
-
+      if (sigTs < existing.lastTs) return;   // ignorar señal antigua
       existing.lat      = lat;
       existing.lon      = lon;
       existing.speed    = speed;
@@ -299,20 +301,23 @@ const App = (() => {
       existing.lastSeen = new Date().toLocaleTimeString('es-ES');
       existing.lastTs   = sigTs;
       if (name && !name.startsWith('MMSI')) existing.name = name;
+      if (cached) { existing.gear = shipType; existing.flag = flag; existing.isFishing = (shipType === 'fishing'); }
     } else {
       state.vesselMap.set(mmsi, {
         id: mmsi, mmsi, name,
         imo:       raw.imo ? `IMO${raw.imo}` : '—',
-        flag:      '??',
-        gear:      detectGearFromName(name),
-        isFishing: null,   // VesselAPI no devuelve tipo en este endpoint
+        flag,
+        gear:      shipType,
+        isFishing: cached ? (shipType === 'fishing') : null,
         aisType:   null,
         status:    mapNavStatus(navStat),
         lat, lon, speed, course,
         lastSeen:  new Date().toLocaleTimeString('es-ES'),
-        lastTs:    raw.timestamp ? new Date(raw.timestamp).getTime() : now,
+        lastTs:    sigTs,
         source:    'vesselapi',
       });
+      // Si no está en caché, añadir a la cola de enriquecimiento
+      if (!cached) enrichQueue.add(mmsi);
     }
   }
 
@@ -321,15 +326,64 @@ const App = (() => {
   // ──────────────────────────────────────────────
 
   let _msgCount = 0;
-  const nonFishingMmsi = new Set(); // MMSIs confirmados como NO pesqueros
+  const nonFishingMmsi  = new Set();
+  const mmsiTypeCache   = new Map();  // mmsi → { shipType, flag, rawType }
+  const enrichQueue     = new Set();  // MMSIs pendientes de enriquecer
 
-  // Tipos AIS definitivamente no pesqueros
+  // Normaliza el vessel_type de VesselAPI a una clave de CONFIG.GEAR_TYPES
+  function normalizeVesselType(raw) {
+    if (!raw) return 'other';
+    const t = raw.toLowerCase();
+    if (t.includes('fishing'))                            return 'fishing';
+    if (t.includes('tanker'))                             return 'tanker';
+    if (t.includes('passenger') || t.includes('ferry'))  return 'passenger';
+    if (t.includes('tug') || t.includes('tow'))          return 'tug';
+    if (t.includes('pleasure') || t.includes('yacht') || t.includes('sailing')) return 'pleasure';
+    if (t.includes('cargo') || t.includes('bulk') ||
+        t.includes('container') || t.includes('general')) return 'cargo';
+    return 'other';
+  }
+
+  // Enriquece hasta 12 barcos nuevos con tipo y bandera desde VesselAPI
+  async function enrichVessels() {
+    const toFetch = [...enrichQueue].slice(0, 12);
+    if (toFetch.length === 0) return;
+    toFetch.forEach(m => enrichQueue.delete(m));
+
+    await Promise.allSettled(toFetch.map(async (mmsi) => {
+      try {
+        const res  = await fetch(`${CONFIG.PROXY_URL}/v1/search/vessels?filter.mmsi=${mmsi}`);
+        if (!res.ok) return;
+        const json = await res.json();
+        const v    = json.vessels?.[0];
+        if (!v) return;
+
+        const info = {
+          shipType: normalizeVesselType(v.vessel_type),
+          flag:     v.country_code || '??',
+          rawType:  v.vessel_type  || 'Unknown',
+        };
+        mmsiTypeCache.set(mmsi, info);
+
+        const vessel = state.vesselMap.get(mmsi);
+        if (vessel) {
+          vessel.gear      = info.shipType;
+          vessel.flag      = info.flag;
+          vessel.rawType   = info.rawType;
+          vessel.isFishing = (info.shipType === 'fishing');
+        }
+      } catch (_) {}
+    }));
+
+    scheduleUIUpdate();
+  }
+
   const NON_FISHING_TYPES = new Set([
-    60,61,62,63,64,65,66,67,68,69,   // Pasajeros
-    70,71,72,73,74,75,76,77,78,79,   // Carga
-    80,81,82,83,84,85,86,87,88,89,   // Tanqueros
-    31,32,33,34,35,36,37,            // Remolque, militar, vela, recreo
-    50,51,52,53,54,55,56,57,58,59,   // Servicios especiales
+    60,61,62,63,64,65,66,67,68,69,
+    70,71,72,73,74,75,76,77,78,79,
+    80,81,82,83,84,85,86,87,88,89,
+    31,32,33,34,35,36,37,
+    50,51,52,53,54,55,56,57,58,59,
   ]);
 
   // Devuelve el bounding box del mapa actual en formato AISStream
@@ -534,11 +588,13 @@ const App = (() => {
 
   function detectGearFromName(name) {
     const n = (name || '').toLowerCase();
-    if (n.includes('trawl')   || n.includes('arrastre'))  return 'trawlers';
-    if (n.includes('seine')   || n.includes('cerco'))     return 'purse_seines';
-    if (n.includes('longlin') || n.includes('palangre'))  return 'longliners';
-    if (n.includes('gillnet') || n.includes('enmalle'))   return 'set_gillnets';
-    return 'trawlers';
+    if (n.includes('tanker')  || n.includes('petrol'))    return 'tanker';
+    if (n.includes('ferry')   || n.includes('passenger')) return 'passenger';
+    if (n.includes('tug')     || n.includes('remolc'))    return 'tug';
+    if (n.includes('yacht')   || n.includes('sailing'))   return 'pleasure';
+    if (n.includes('msc ')    || n.includes('maersk') ||
+        n.includes('cosco')   || n.includes('cargo'))     return 'cargo';
+    return 'other';   // desconocido hasta enriquecimiento
   }
 
   function mapNavStatus(n) {

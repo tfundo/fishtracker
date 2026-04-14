@@ -27,12 +27,15 @@ const CONFIG = {
   TILE_LIGHT: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
   TILE_LIGHT_ATTR: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
 
-  // ---------- Tipos de pesca ----------
+  // ---------- Tipos de barco (como VesselFinder) ----------
   GEAR_TYPES: {
-    trawlers:      { label: 'Arrastre',   icon: '🔺', color: '#e74c3c', gfw: 'trawlers' },
-    purse_seines:  { label: 'Cerco',      icon: '⭕', color: '#f39c12', gfw: 'purse_seines' },
-    longliners:    { label: 'Palangre',   icon: '〰️', color: '#3498db', gfw: 'longliners' },
-    set_gillnets:  { label: 'Enmalle',    icon: '🟦', color: '#2ecc71', gfw: 'set_gillnets' },
+    fishing:   { label: 'Pesca',      icon: '🎣', color: '#27ae60' },
+    cargo:     { label: 'Carga',      icon: '📦', color: '#3498db' },
+    tanker:    { label: 'Tanquero',   icon: '🛢️', color: '#e74c3c' },
+    passenger: { label: 'Pasajeros',  icon: '🚢', color: '#9b59b6' },
+    tug:       { label: 'Remolque',   icon: '⚓', color: '#f39c12' },
+    pleasure:  { label: 'Recreo',     icon: '🛥️', color: '#e67e22' },
+    other:     { label: 'Otros',      icon: '🚤', color: '#95a5a6' },
   },
 
   // ---------- Periodos (tiempo máximo de inactividad antes de retirar un barco) ----------
