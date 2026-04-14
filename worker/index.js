@@ -5,8 +5,9 @@
  * gestiona la suscripción y los keepalive pings, y reenvía los mensajes al browser.
  */
 
-const AISSTREAM_API_KEY = '80e4d5513c36e34d2ed75ae3f0a5a2b0cafc31f3';
-const AISSTREAM_WS_URL  = 'wss://stream.aisstream.io/v0/stream';
+// API key guardada como Cloudflare Secret (nunca en el código fuente)
+// Para configurarla: wrangler secret put AISSTREAM_API_KEY
+const AISSTREAM_WS_URL = 'wss://stream.aisstream.io/v0/stream';
 
 const CORS = {
   'Access-Control-Allow-Origin':  '*',
@@ -15,7 +16,7 @@ const CORS = {
 };
 
 export default {
-  async fetch(request, env, ctx) {
+  async fetch(request, env) {
     const url = new URL(request.url);
 
     if (request.method === 'OPTIONS') {
@@ -27,7 +28,7 @@ export default {
       if (upgrade !== 'websocket') {
         return new Response('Se requiere WebSocket', { status: 426, headers: CORS });
       }
-      return proxyAISStream(request, url, ctx);
+      return proxyAISStream(request, url, env);
     }
 
     if (url.pathname === '/status') {
@@ -44,7 +45,7 @@ export default {
   },
 };
 
-async function proxyAISStream(request, url) {
+async function proxyAISStream(request, url, env) {
   // Bounding box desde query params
   const s = parseFloat(url.searchParams.get('s') || '-90');
   const w = parseFloat(url.searchParams.get('w') || '-180');
@@ -74,9 +75,9 @@ async function proxyAISStream(request, url) {
 
   aisSocket.accept();
 
-  // Suscribir con la API key y el bounding box
+  // Suscribir con la API key (desde Cloudflare Secret) y el bounding box
   aisSocket.send(JSON.stringify({
-    APIKey: AISSTREAM_API_KEY,
+    APIKey: env.AISSTREAM_API_KEY,
     BoundingBoxes: [[[s, w], [n, e]]],
     FilterMessageTypes: [
       'PositionReport',
