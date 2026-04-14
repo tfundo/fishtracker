@@ -255,7 +255,7 @@ const App = (() => {
 
     _ws.onopen = () => {
       const subscription = {
-        APIKey: CONFIG.AISSTREAM_API_KEY,
+        Apikey: CONFIG.AISSTREAM_API_KEY,
         BoundingBoxes: [[[s, w], [n, e]]],
         FilterMessageTypes: [
           'PositionReport',               // Class A (grandes)
