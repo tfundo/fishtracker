@@ -255,13 +255,13 @@ const App = (() => {
 
     _ws.onopen = () => {
       const subscription = {
-        Apikey: CONFIG.AISSTREAM_API_KEY,
+        APIKey: CONFIG.AISSTREAM_API_KEY,
         BoundingBoxes: [[[s, w], [n, e]]],
         FilterMessageTypes: [
           'PositionReport',               // Class A (grandes)
           'StandardClassBPositionReport', // Class B (pesqueros pequeños)
           'ShipStaticData',               // Nombre/tipo Class A
-          'ClassBCSStaticDataReport',     // Nombre/tipo Class B
+          'StaticDataReport',             // Nombre/tipo Class B
         ],
       };
       _ws.send(JSON.stringify(subscription));
@@ -337,16 +337,20 @@ const App = (() => {
       mmsiTypeCache.set(mmsi, info);
       applyStaticInfo(mmsi, info);
 
-    } else if (type === 'ClassBCSStaticDataReport') {
-      const s = msg.Message?.ClassBCSStaticDataReport;
+    } else if (type === 'StaticDataReport') {
+      // AIS tipo 24 — datos estáticos Class B (nombre, tipo, callsign)
+      const s = msg.Message?.StaticDataReport;
       if (!s) return;
-      const gear = aisTypeToGear(s.Type ?? 0);
+      // Parte A tiene nombre, Parte B tiene tipo
+      const name = (s.Name || s.ReportA?.Name || s.ReportB?.Name || meta.ShipName || '').trim();
+      const shipTypeCode = s.Type ?? s.ReportB?.ShipType ?? 0;
+      const gear = aisTypeToGear(shipTypeCode);
       const info = {
         shipType: gear,
         flag:     mmsiToFlag(mmsi),
-        rawType:  aisTypeName(s.Type ?? 0),
+        rawType:  aisTypeName(shipTypeCode),
         imo:      '—',
-        name:     (s.Name || meta.ShipName || '').trim(),
+        name,
       };
       mmsiTypeCache.set(mmsi, info);
       applyStaticInfo(mmsi, info);
