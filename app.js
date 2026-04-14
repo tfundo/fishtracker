@@ -173,30 +173,52 @@ const App = (() => {
 
     try {
       const tiles   = getQueryTiles();
+      console.log('[FishTracker] Consultando tiles:', tiles);
+
       const results = await Promise.allSettled(tiles.map(queryBoundingBox));
 
       state.vesselMap.clear();
-      let count = 0;
+      let totalRaw = 0;
+      let count    = 0;
 
-      results.forEach(r => {
-        if (r.status !== 'fulfilled') return;
-        (r.value || []).forEach(v => {
-          if (!isFishingVessel(v)) return;
+      results.forEach((r, i) => {
+        if (r.status === 'rejected') {
+          console.warn(`[FishTracker] Tile ${i} error:`, r.reason);
+          return;
+        }
+        const raw = r.value || [];
+        totalRaw += raw.length;
+
+        // Exponer en consola para depuración
+        if (i === 0 && raw.length > 0) {
+          console.log('[FishTracker] Ejemplo de objeto recibido:', raw[0]);
+          window._ftSample = raw[0];
+        }
+
+        raw.forEach(v => {
           const parsed = parseVesselAPIVessel(v);
-          if (parsed.lat === 0 && parsed.lon === 0) return; // sin posición
+          if (parsed.lat === 0 && parsed.lon === 0) return;
           state.vesselMap.set(parsed.id, parsed);
           count++;
         });
       });
 
+      console.log(`[FishTracker] Raw: ${totalRaw} | Añadidos: ${count}`);
+      window._ftLastResults = results;
+
       setApiStatus(true);
       setLoadingBar(80);
       applyFilters();
       setLoadingBar(100);
-      toast(`${count} barcos pesqueros cargados`, count > 0 ? 'success' : 'info');
+
+      if (totalRaw === 0) {
+        toast('La API no devolvió barcos — revisa F12 > Console', 'warning');
+      } else {
+        toast(`${count} barcos cargados (${totalRaw} recibidos)`, 'success');
+      }
 
     } catch (err) {
-      console.error('VesselAPI error:', err);
+      console.error('[FishTracker] Error:', err);
       setApiStatus(false);
       toast(`Error VesselAPI: ${err.message}`, 'error');
     } finally {
@@ -240,58 +262,52 @@ const App = (() => {
 
   // Una llamada REST a /location/vessels/bounding-box
   async function queryBoundingBox(tile) {
-    const { hours } = CONFIG.PERIODS[state.activePeriod];
-    const timeTo   = new Date();
-    const timeFrom = new Date(timeTo.getTime() - hours * 3600000);
-
     const params = new URLSearchParams({
       latBottom:          tile.latBottom.toFixed(4),
       latTop:             tile.latTop.toFixed(4),
       lonLeft:            tile.lonLeft.toFixed(4),
       lonRight:           tile.lonRight.toFixed(4),
-      'time.from':        timeFrom.toISOString(),
-      'time.to':          timeTo.toISOString(),
       'pagination.limit': '50',
     });
 
-    const res = await fetch(
-      `${CONFIG.VESSELAPI_BASE}/location/vessels/bounding-box?${params}`,
-      { headers: { 'Authorization': `Bearer ${CONFIG.VESSELAPI_TOKEN}` } }
-    );
+    const url = `${CONFIG.VESSELAPI_BASE}/location/vessels/bounding-box?${params}`;
+    console.log('[FishTracker] GET', url);
 
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-    const data = await res.json();
-    return data.vessels || data.vesselPositions || [];
-  }
+    const res = await fetch(url, {
+      headers: { 'Authorization': `Bearer ${CONFIG.VESSELAPI_TOKEN}` }
+    });
 
-  // ¿Es este barco un pesquero?
-  function isFishingVessel(v) {
-    const type      = String(v.type || v.vesselType || v.shipType || '').toLowerCase();
-    const navStatus = v.position?.nav_status ?? v.navStatus ?? -1;
-    if (type.includes('fish')) return true;
-    if (type === '30')         return true;
-    if (navStatus === 7)       return true;
-    return false;
+    const text = await res.text();
+    console.log(`[FishTracker] Respuesta ${res.status}:`, text.slice(0, 500));
+
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${text.slice(0, 200)}`);
+
+    const data = JSON.parse(text);
+    // Aceptar cualquier array que devuelva la API
+    return data.vessels ?? data.vesselPositions ?? data.data ?? data.results ?? [];
   }
 
   // Convierte respuesta VesselAPI → objeto interno
+  // Acepta cualquier estructura conocida de la API
   function parseVesselAPIVessel(v) {
-    const pos = v.position || {};
-    const id  = String(v.mmsi || v.id || Math.random());
+    // Posición: puede venir anidada en .position o en la raíz
+    const pos = v.position ?? v.lastPosition ?? v;
+    const id  = String(v.mmsi ?? v.id ?? v.vesselId ?? Math.random());
+
     return {
       id,
-      name:     v.name || `MMSI ${id}`,
-      mmsi:     v.mmsi || '—',
+      name:     v.name ?? v.vesselName ?? v.shipName ?? `MMSI ${id}`,
+      mmsi:     String(v.mmsi ?? '—'),
       imo:      v.imo  ? `IMO${v.imo}` : '—',
-      flag:     v.flag || v.countryCode || '??',
-      gear:     detectGearFromName(v.name || ''),
-      status:   mapNavStatus(pos.nav_status ?? -1),
-      lat:      pos.latitude  ?? 0,
-      lon:      pos.longitude ?? 0,
-      speed:    (pos.sog ?? 0).toFixed(1),
-      course:   Math.round(pos.cog ?? 0),
-      lastSeen: pos.timestamp
-                  ? new Date(pos.timestamp).toLocaleTimeString('es-ES')
+      flag:     v.flag ?? v.countryCode ?? v.country ?? '??',
+      gear:     detectGearFromName(v.name ?? v.vesselName ?? ''),
+      status:   mapNavStatus(pos.nav_status ?? pos.navStatus ?? pos.status ?? -1),
+      lat:      pos.latitude  ?? pos.lat ?? 0,
+      lon:      pos.longitude ?? pos.lon ?? pos.lng ?? 0,
+      speed:    Number(pos.sog ?? pos.speed ?? 0).toFixed(1),
+      course:   Math.round(pos.cog ?? pos.course ?? pos.heading ?? 0),
+      lastSeen: pos.timestamp ?? pos.time ?? pos.updatedAt
+                  ? new Date(pos.timestamp ?? pos.time ?? pos.updatedAt).toLocaleTimeString('es-ES')
                   : new Date().toLocaleTimeString('es-ES'),
       lastTs:   Date.now(),
     };
